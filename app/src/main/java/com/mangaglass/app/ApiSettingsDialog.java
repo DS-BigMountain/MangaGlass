@@ -22,7 +22,6 @@ import java.util.concurrent.Executors;
 final class ApiSettingsDialog {
     private final Activity activity;
     private final Settings settings;
-    private final boolean vision;
     private final Runnable onSaved;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -46,12 +45,12 @@ final class ApiSettingsDialog {
             main.postDelayed(this, 500);
         }
     };
-    ApiSettingsDialog(Activity activity, Settings settings, boolean vision, Runnable onSaved) {
-        this.activity = activity; this.settings = settings; this.vision = vision; this.onSaved = onSaved;
+    ApiSettingsDialog(Activity activity, Settings settings, Runnable onSaved) {
+        this.activity = activity; this.settings = settings; this.onSaved = onSaved;
     }
     void show() {
         Settings.Profile initial;
-        try { initial = settings.profile(vision); } catch (Exception e) { initial = new Settings.Profile("https://api.deepseek.com", "", ""); }
+        try { initial = settings.profile(); } catch (Exception e) { initial = new Settings.Profile("", "", ""); }
         LinearLayout content = Ui.column(activity);
         content.setPadding(Ui.dp(activity,22), Ui.dp(activity,12), Ui.dp(activity,22), Ui.dp(activity,20));
         content.setBackgroundColor(Ui.BG);
@@ -60,9 +59,9 @@ final class ApiSettingsDialog {
         back.setBackgroundColor(Color.TRANSPARENT); back.setContentDescription("返回首页");
         back.setPadding(Ui.dp(activity,12),Ui.dp(activity,12),Ui.dp(activity,12),Ui.dp(activity,12));
         back.setOnClickListener(v -> dialog.dismiss()); header.addView(back,new LinearLayout.LayoutParams(Ui.dp(activity,44),Ui.dp(activity,48)));
-        header.addView(Ui.text(activity,vision ? "视觉识别与翻译 API" : "文字翻译 API",21,Ui.INK,true)); content.addView(header);
+        header.addView(Ui.text(activity,"AI 截图翻译 API",21,Ui.INK,true)); content.addView(header);
         Ui.gap(content,12);
-        content.addView(Ui.text(activity, vision ? "发送完整截图，使用支持图片的模型。" : "仅发送本机识别的文字。", 12, Ui.MUTED, false));
+        content.addView(Ui.text(activity, "发送完整截图，AI 自动识别语言并翻译为简体中文。", 12, Ui.MUTED, false));
         Ui.gap(content,12);
         url = input(content, "API 基础地址（HTTPS）", initial.url, false);
         key = input(content, "API Key", initial.key, true);
@@ -79,7 +78,7 @@ final class ApiSettingsDialog {
         choose = Ui.button(activity, "⌄", false); choose.setContentDescription("选择已获取的模型"); choose.setBackgroundColor(Color.TRANSPARENT);
         modelRow.addView(choose,new LinearLayout.LayoutParams(Ui.dp(activity,48),Ui.dp(activity,54))); content.addView(modelRow);
         Ui.gap(content,8); fetch = Ui.button(activity, "连接并获取模型", false); content.addView(fetch);
-        models = settings.models(vision, initial.url, initial.key); updateChoices();
+        models = settings.models(initial.url, initial.key); updateChoices();
         choose.setOnClickListener(v -> {
             String[] labels = new String[models.size()];
             for (int i = 0; i < models.size(); i++) labels[i] = models.get(i).label();
@@ -99,15 +98,15 @@ final class ApiSettingsDialog {
             @Override public void onNothingSelected(AdapterView<?> p) { }
         });
         lossless = new CheckBox(activity); lossless.setText("发送无损截图（图片较大）"); lossless.setChecked(initial.lossless);
-        if (vision) { content.addView(lossless); editable.add(lossless); content.addView(Ui.text(activity,"默认发送高质量 JPEG，保留原始像素尺寸。细字失真时可切换无损截图。",12,Ui.MUTED,false)); }
+        content.addView(lossless); editable.add(lossless); content.addView(Ui.text(activity,"默认发送高质量 JPEG，保留原始像素尺寸。细字失真时可切换无损截图。",12,Ui.MUTED,false));
         Ui.gap(content,12);
         content.addView(Ui.text(activity,"模型可用性以测试为准，翻译测试会产生 API 用量。",12,Ui.MUTED,false));
         Ui.gap(content,8); result = Ui.text(activity,"",12,Ui.INK,false); result.setVisibility(View.GONE); content.addView(result);
-        test = Ui.button(activity,vision ? "测试识图与翻译" : "测试文字翻译",false); content.addView(test);
+        test = Ui.button(activity,"测试识图与翻译",false); content.addView(test);
         TextWatcher endpointChange = new TextWatcher() {
             public void beforeTextChanged(CharSequence s,int start,int count,int after) { }
             public void onTextChanged(CharSequence s,int start,int before,int count) {
-                models = settings.models(vision,url.getText().toString(),key.getText().toString()); updateChoices(); updatePolicyHint();
+                models = settings.models(url.getText().toString(),key.getText().toString()); updateChoices(); updatePolicyHint();
                 showResult("配置已修改，请重新获取模型或测试翻译后保存。");
             }
             public void afterTextChanged(Editable e) { }
@@ -120,14 +119,14 @@ final class ApiSettingsDialog {
         });
         Ui.gap(content,10); save=Ui.button(activity,"保存",true); content.addView(save);
         clear=Ui.button(activity,"清除密钥",false); clear.setBackgroundColor(Color.TRANSPARENT); content.addView(clear);
-        clear.setOnClickListener(v -> { settings.clearKey(vision); onSaved.run(); dialog.dismiss(); });
+        clear.setOnClickListener(v -> { settings.clearKey(); onSaved.run(); dialog.dismiss(); });
         ScrollView scroll = new ScrollView(activity); scroll.setFillViewport(true); scroll.setBackgroundColor(Ui.BG); scroll.addView(content);
         scroll.setOnApplyWindowInsetsListener((v,insets) -> { v.setPadding(insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom()); return insets; });
         dialog = new AlertDialog.Builder(activity).create(); dialog.setView(scroll,0,0,0,0);
         save.setOnClickListener(v -> {
                 try {
                     Settings.Profile profile = snapshot();
-                    settings.saveProfile(vision, profile.url, profile.model, profile.key, profile.thinking, profile.lossless, models);
+                    settings.saveProfile(profile.url, profile.model, profile.key, profile.thinking, profile.lossless, models);
                     onSaved.run(); dialog.dismiss();
                 } catch (Exception e) { showResult(e instanceof IllegalArgumentException ? e.getMessage() : "配置保存失败，请重试"); }
         });
@@ -179,10 +178,10 @@ final class ApiSettingsDialog {
         try {
             profile = snapshot();
             if (generation && !profile.ready()) throw new IllegalArgumentException("请先选择或填写模型名称");
-            if (generation && vision && profile.modelInfo != null && profile.modelInfo.knownTextOnly()) throw new IllegalArgumentException("此模型仅支持文字输入，请选择支持图片的模型");
+            if (generation && profile.modelInfo != null && profile.modelInfo.knownTextOnly()) throw new IllegalArgumentException("此模型仅支持文字输入，请选择支持图片的模型");
         } catch (Exception e) { showResult(TranslationEngine.error(e)); return; }
         TranslationEngine engine = new TranslationEngine().recordUsage(TokenUsageStore.get(activity)); active = engine;
-        busyLabel = generation ? (vision ? "测试识图与翻译" : "测试文字翻译") : "正在获取模型列表";
+        busyLabel = generation ? "测试识图与翻译" : "正在获取模型列表";
         setBusy(true);
         worker.execute(() -> {
             String message; List<ModelCatalog.Model> fetched = null;
@@ -190,17 +189,14 @@ final class ApiSettingsDialog {
                 if (!generation) {
                     fetched = engine.models(profile);
                     message = fetched.isEmpty() ? "接口已响应，但未返回模型。可手动填写模型后测试翻译。" : "已获取 " + fetched.size() + " 个模型，请选择后测试。";
-                } else if (vision) {
+                } else {
                     Bitmap image = Bitmap.createBitmap(480,240,Bitmap.Config.ARGB_8888);
                     try {
                         Canvas canvas = new Canvas(image); canvas.drawColor(Color.WHITE);
                         Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG); paint.setColor(Color.BLACK); paint.setTextSize(38); canvas.drawText("Hello, my friend!",50,125,paint);
-                        List<TextRegion> regions = engine.translate(image,true,"en",profile,ignored -> { });
+                        List<TextRegion> regions = engine.translate(image,profile,ignored -> { });
                         message = regions.isEmpty() ? "接口已响应，但未识别出样例文字。请更换视觉模型。" : "识图测试成功：" + regions.get(0).translated;
                     } finally { image.recycle(); }
-                } else {
-                    String response = engine.post(TranslationProtocol.request(profile.model,"en",Collections.singletonList("Hello, my friend!")),profile);
-                    message = "翻译测试成功：" + TranslationProtocol.response(response,1).get(0);
                 }
             } catch (Exception e) { message = TranslationEngine.error(e); }
             String text = message + "\n耗时 " + TranslationEngine.seconds(SystemClock.elapsedRealtime() - started) + " 秒";

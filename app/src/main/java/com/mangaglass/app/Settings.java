@@ -12,34 +12,32 @@ import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
 public final class Settings {
-    public static final String[] LANGUAGE_LABELS = {"日语 · 竖排优先", "英语", "韩语", "法语", "德语", "西班牙语", "中文繁体"};
-    public static final String[] LANGUAGE_CODES = {"ja", "en", "ko", "fr", "de", "es", "zh"};
+    // Keep the existing image-profile namespace so upgrades retain its encrypted key and model.
+    private static final String PREFIX = "vision_";
     private static final String ALIAS = "mangaglass.api.key.v1";
     private final SharedPreferences preferences;
-    public Settings(Context context) { preferences = context.getSharedPreferences("settings", Context.MODE_PRIVATE); }
-    public int languageIndex() { return Math.max(0, Math.min(LANGUAGE_CODES.length - 1, preferences.getInt("language", 0))); }
-    public String source() { return LANGUAGE_CODES[languageIndex()]; }
-    public boolean vision() { return preferences.getBoolean("vision", false); }
-    public void saveMode(int language, boolean vision) { preferences.edit().putInt("language", language).putBoolean("vision", vision).apply(); }
-    public void saveLastTiming(String value) { preferences.edit().putString("last_timing",value).apply(); }
-    public String lastTiming() { return preferences.getString("last_timing",""); }
-    public Profile profile(boolean vision) throws Exception {
-        String p = vision ? "vision_" : "text_";
-        String url = preferences.getString(p + "url", "https://api.deepseek.com"), key = key(p);
+    public Settings(Context context) {
+        preferences = context.getSharedPreferences("settings", Context.MODE_PRIVATE);
+        // Replace the legacy single free-text timing summary with numeric timing records.
+        if(preferences.contains("last_timing")) preferences.edit().remove("last_timing").apply();
+    }
+    public Profile profile() throws Exception {
+        String p = PREFIX;
+        String url = preferences.getString(p + "url", ""), key = key(p);
         return new Profile(url, preferences.getString(p + "model", ""), key, preferences.getString(p + "thinking", "auto"),
-                preferences.getBoolean(p + "lossless", false), models(vision, url, key));
+                preferences.getBoolean(p + "lossless", false), models(url, key));
     }
-    public void saveProfile(boolean vision, String url, String model, String newKey) throws Exception {
-        saveProfile(vision, url, model, newKey, "auto", false);
+    public void saveProfile(String url, String model, String newKey) throws Exception {
+        saveProfile(url, model, newKey, "auto", false);
     }
-    public void saveProfile(boolean vision, String url, String model, String newKey, String thinking, boolean lossless) throws Exception {
-        saveProfile(vision,url,model,newKey,thinking,lossless,null);
+    public void saveProfile(String url, String model, String newKey, String thinking, boolean lossless) throws Exception {
+        saveProfile(url,model,newKey,thinking,lossless,null);
     }
-    public void saveProfile(boolean vision, String url, String model, String newKey, String thinking, boolean lossless, java.util.List<ModelCatalog.Model> models) throws Exception {
+    public void saveProfile(String url, String model, String newKey, String thinking, boolean lossless, java.util.List<ModelCatalog.Model> models) throws Exception {
         TranslationProtocol.endpoint(url);
         if (model.trim().isEmpty()) throw new IllegalArgumentException("请填写服务商的模型名称");
         if (newKey.trim().isEmpty()) throw new IllegalArgumentException("请填写 API 密钥");
-        String p = vision ? "vision_" : "text_";
+        String p = PREFIX;
         SharedPreferences.Editor edit = preferences.edit().putString(p + "url", url.trim()).putString(p + "model", model.trim())
                 .putString(p + "thinking", RequestPolicy.VALUES[RequestPolicy.index(thinking)]).putBoolean(p + "lossless", lossless);
         if (!scope(url, newKey).equals(preferences.getString(p + "models_scope", ""))) edit.remove(p + "models").remove(p + "models_scope");
@@ -57,22 +55,22 @@ public final class Settings {
         cipher.init(Cipher.DECRYPT_MODE, secret(), new GCMParameterSpec(128, Base64.decode(preferences.getString(prefix + "iv", ""), Base64.NO_WRAP)));
         return new String(cipher.doFinal(Base64.decode(stored, Base64.NO_WRAP)), java.nio.charset.StandardCharsets.UTF_8);
     }
-    public void clearKey(boolean vision) {
-        String p = vision ? "vision_" : "text_";
+    public void clearKey() {
+        String p = PREFIX;
         preferences.edit().remove(p + "ciphertext").remove(p + "iv").remove(p + "models").remove(p + "models_scope").apply();
     }
-    private java.util.List<ModelCatalog.Model> models(boolean vision) {
-        try { return ModelCatalog.parse(preferences.getString((vision ? "vision_" : "text_") + "models", "{\"data\":[]}")); }
+    private java.util.List<ModelCatalog.Model> models() {
+        try { return ModelCatalog.parse(preferences.getString(PREFIX + "models", "{\"data\":[]}")); }
         catch (Exception e) { return java.util.Collections.emptyList(); }
     }
-    public java.util.List<ModelCatalog.Model> models(boolean vision, String url, String key) {
+    public java.util.List<ModelCatalog.Model> models(String url, String key) {
         try {
-            if (scope(url, key).equals(preferences.getString((vision ? "vision_" : "text_") + "models_scope", ""))) return models(vision);
+            if (scope(url, key).equals(preferences.getString(PREFIX + "models_scope", ""))) return models();
         } catch (Exception ignored) { }
         return java.util.Collections.emptyList();
     }
-    public void saveModels(boolean vision, Profile profile, java.util.List<ModelCatalog.Model> models) throws Exception {
-        String p = vision ? "vision_" : "text_";
+    public void saveModels(Profile profile, java.util.List<ModelCatalog.Model> models) throws Exception {
+        String p = PREFIX;
         if (!preferences.edit().putString(p + "models_scope", scope(profile.url, profile.key))
                 .putString(p + "models", ModelCatalog.serialize(models)).commit()) throw new IllegalStateException("模型列表保存失败");
     }

@@ -15,6 +15,7 @@ final class UiIcon extends Drawable {
                 c.drawCircle(12,12,7,p); c.drawCircle(12,12,2.8f,p);
                 for(int i=0;i<8;i++) { c.save(); c.rotate(i*45,12,12); c.drawLine(12,2,12,5,p); c.restore(); } break;
             case "usage": c.drawLine(5,19,5,11,p); c.drawLine(12,19,12,4,p); c.drawLine(19,19,19,8,p); break;
+            case "clock": c.drawCircle(12,12,9,p); c.drawLine(12,6,12,12,p); c.drawLine(12,12,16,14,p); break;
             case "tile": for(int x:new int[]{3,14}) for(int y:new int[]{3,14}) c.drawRoundRect(x,y,x+7,y+7,1.2f,1.2f,p); break;
             case "back": c.drawLine(4,12,21,12,p); c.drawLine(4,12,11,5,p); c.drawLine(4,12,11,19,p); break;
             default:

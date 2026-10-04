@@ -10,6 +10,10 @@
 !/gradlew.bat
 !/gradle/
 !/app/
+!/scripts/
+
+/scripts/*
+!/scripts/build.ps1
 
 /gradle/*
 !/gradle/wrapper/
