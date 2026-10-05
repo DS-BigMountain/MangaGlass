@@ -28,24 +28,33 @@ public final class CaptureService extends Service {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final SessionGate gate = new SessionGate();
-    private final OcrSession ocr = new OcrSession();
-    private final TranslationCache translations = new TranslationCache();
+    private Context windowContext;
+    private DisplayManager displays;
     private WindowManager windows;
     private MediaProjection projection;
     private VirtualDisplay display;
     private ImageReader reader;
     private TextView ball;
     private WindowManager.LayoutParams ballParams;
+    private final FloatingBallPosition ballPosition=new FloatingBallPosition();
     private TranslationOverlay overlay;
     private Bitmap screenshot;
     private Future<?> job;
     private TranslationEngine engine;
-    private int width,height;
+    private int width,height,rotation;
     private long captureToken = -1;
-    private long pageStarted;
-    private Runnable captureTimeout, jobTimeout;
+    private long captureRequestToken = -1;
+    private TranslationTiming activeTiming;
+    private Runnable captureTimeout, captureAttempt, jobTimeout;
     private boolean tearingDown;
     private boolean navigationRegistered;
+    private final DisplayManager.DisplayListener displayListener = new DisplayManager.DisplayListener() {
+        @Override public void onDisplayAdded(int id) {}
+        @Override public void onDisplayRemoved(int id) { if (id == Display.DEFAULT_DISPLAY) stopSelf(); }
+        @Override public void onDisplayChanged(int id) {
+            if (id == Display.DEFAULT_DISPLAY) main.post(() -> syncDisplay());
+        }
+    };
     private final BroadcastReceiver navigationReceiver=new BroadcastReceiver() {
         @Override public void onReceive(Context context,Intent intent) {
             // System navigation/lock must dismiss the frozen page, not just hide its text.
@@ -63,7 +72,16 @@ public final class CaptureService extends Service {
         }
     };
     @Override public void onCreate() {
-        super.onCreate(); windows = getSystemService(WindowManager.class);
+        super.onCreate();
+        displays = getSystemService(DisplayManager.class);
+        // A Service's resources may still describe the background activity's orientation.
+        // Bind both metrics and overlay views to the actual display's window configuration.
+        windowContext = Build.VERSION.SDK_INT >= 30
+                ? createDisplayContext(displays.getDisplay(Display.DEFAULT_DISPLAY))
+                    .createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
+                : this;
+        windows = windowContext.getSystemService(WindowManager.class);
+        displays.registerDisplayListener(displayListener, main);
         IntentFilter events=new IntentFilter(Intent.ACTION_CLOSE_SYSTEM_DIALOGS); events.addAction(Intent.ACTION_SCREEN_OFF);
         if(Build.VERSION.SDK_INT>=33) registerReceiver(navigationReceiver,events,Context.RECEIVER_NOT_EXPORTED);
         else registerNavigationOnOlderAndroid(events);
@@ -94,14 +112,21 @@ public final class CaptureService extends Service {
             if (projection == null) throw new IllegalArgumentException("截图授权已失效");
             projection.registerCallback(projectionCallback,main);
             Point size = screenSize(); width=size.x; height=size.y;
+            rotation=windows.getDefaultDisplay().getRotation();
             reader = newReader(width,height);
-            display = projection.createVirtualDisplay("MangaGlass",width,height,getResources().getConfiguration().densityDpi,
+            display = projection.createVirtualDisplay("MangaGlass",width,height,windowContext.getResources().getConfiguration().densityDpi,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,reader.getSurface(),null,main);
             showBall(); running = true; TranslationTileService.refresh(this);
         } catch (Exception e) { toast("无法开启悬浮翻译，请检查悬浮窗权限后重新授权"); stopSelf(); }
         return START_NOT_STICKY;
     }
     private Point screenSize() {
+        // This MATCH_PARENT window explicitly opts out of all insets on Android 11+.
+        // Its measured size is the final authority if an OEM delivers stale metrics.
+        if (Build.VERSION.SDK_INT >= 30 && overlay != null && overlay.isAttachedToWindow()
+                && overlay.getWidth() > 0 && overlay.getHeight() > 0) {
+            return new Point(overlay.getWidth(),overlay.getHeight());
+        }
         if (Build.VERSION.SDK_INT >= 30) { Rect bounds = windows.getMaximumWindowMetrics().getBounds(); return new Point(bounds.width(),bounds.height()); }
         Point size=new Point(); windows.getDefaultDisplay().getRealSize(size); return size;
     }
@@ -112,17 +137,27 @@ public final class CaptureService extends Service {
     private void imageAvailable(ImageReader source) {
         if (source != reader || tearingDown) return;
         if (captureToken == -2) return; // Keep the post-hide frame queued until the compositor has settled.
+        // Display/configuration callbacks can arrive after the tap. Never send a frame
+        // from an obsolete surface to the model or place it on a differently sized screen.
+        if (captureToken >= 0 && syncDisplay()) return;
         try (Image image = source.acquireLatestImage()) {
             if (image == null || captureToken < 0 || !gate.current(captureToken)) return;
-            long token = captureToken; captureToken = -1;
-            if (captureTimeout != null) main.removeCallbacks(captureTimeout);
+            int frameWidth=image.getWidth(),frameHeight=image.getHeight();
+            if (frameWidth!=width || frameHeight!=height) return;
             Image.Plane plane = image.getPlanes()[0];
             if (plane.getPixelStride()!=4) throw new IllegalStateException("不支持的截图格式");
-            ByteBuffer raw=plane.getBuffer(); ByteBuffer packed=ByteBuffer.allocateDirect(width*height*4);
-            for (int row=0;row<height;row++) {
-                raw.limit(raw.capacity()); raw.position(row*plane.getRowStride()); raw.limit(raw.position()+width*4); packed.put(raw);
+            // SurfaceFlinger may briefly deliver a new-size buffer containing the old
+            // letterbox transform. Its empty alpha bands must never become an AI image.
+            if (!CapturePixels.fillsEdges(plane.getBuffer(),frameWidth,frameHeight,plane.getRowStride())) return;
+            long token = captureToken; captureToken = -1;
+            if(activeTiming!=null) activeTiming.enter(TranslationTiming.Stage.CAPTURE_PROCESS);
+            if (captureTimeout != null) main.removeCallbacks(captureTimeout);
+            ByteBuffer raw=plane.getBuffer(); ByteBuffer packed=ByteBuffer.allocateDirect(frameWidth*frameHeight*4);
+            for (int row=0;row<frameHeight;row++) {
+                raw.limit(raw.capacity()); raw.position(row*plane.getRowStride()); raw.limit(raw.position()+frameWidth*4); packed.put(raw);
             }
-            packed.flip(); screenshot=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888); screenshot.copyPixelsFromBuffer(packed);
+            packed.flip(); screenshot=Bitmap.createBitmap(frameWidth,frameHeight,Bitmap.Config.ARGB_8888);
+            screenshot.setDensity(Bitmap.DENSITY_NONE); screenshot.copyPixelsFromBuffer(packed);
             overlay.screenshot(screenshot); ball.setVisibility(View.VISIBLE); startTranslation(token);
         } catch (Exception e) { if (gate.state()==SessionGate.State.WORKING) fail("截屏失败，请退出后重新开启"); }
     }
@@ -135,20 +170,24 @@ public final class CaptureService extends Service {
         return params;
     }
     private void showBall() {
-        ball = new TextView(this); ball.setGravity(Gravity.CENTER); ball.setTextSize(21); ball.setTextColor(Color.WHITE);
+        ball = new TextView(windowContext); ball.setGravity(Gravity.CENTER); ball.setTextSize(21); ball.setTextColor(Color.WHITE);
         ball.setTypeface(Typeface.DEFAULT,Typeface.BOLD); ball.setBackground(Ui.shape(Ui.GREEN,28,this)); ball.setElevation(Ui.dp(this,9));
         ball.setText("译"); ball.setContentDescription("漫译悬浮球，点击翻译或退出，拖动移动，长按停止服务");
         ballParams = new WindowManager.LayoutParams(Ui.dp(this,54),Ui.dp(this,54),WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,PixelFormat.TRANSLUCENT);
-        ballParams.gravity=Gravity.TOP | Gravity.LEFT; ballParams.x=width-Ui.dp(this,62); ballParams.y=height/3;
+        ballParams.gravity=Gravity.TOP | Gravity.LEFT; placeBall();
         ball.setOnClickListener(v -> clickBall());
         ball.setOnTouchListener(new View.OnTouchListener() {
-            float startX,startY; int originalX,originalY; boolean moved,longPressed;
-            final Runnable hold=() -> { if (!moved) { longPressed=true; toast("漫译已停止"); stopSelf(); } };
+            float startX,startY; int originalX,originalY,touchWidth,touchHeight,touchRotation; boolean moved,longPressed;
+            final Runnable hold=() -> { if (!moved && touchWidth==width && touchHeight==height && touchRotation==rotation) { longPressed=true; toast("漫译已停止"); stopSelf(); } };
             @Override public boolean onTouch(View v,MotionEvent event) {
+                if(event.getActionMasked()!=MotionEvent.ACTION_DOWN && (touchWidth!=width || touchHeight!=height || touchRotation!=rotation)) {
+                    main.removeCallbacks(hold); return true;
+                }
                 switch(event.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
                         startX=event.getRawX(); startY=event.getRawY(); originalX=ballParams.x; originalY=ballParams.y; moved=false; longPressed=false;
+                        touchWidth=width; touchHeight=height; touchRotation=rotation;
                         main.postDelayed(hold,800); return true;
                     case MotionEvent.ACTION_MOVE:
                         if (Math.hypot(event.getRawX()-startX,event.getRawY()-startY)>ViewConfiguration.get(CaptureService.this).getScaledTouchSlop()) { moved=true; main.removeCallbacks(hold); }
@@ -159,24 +198,39 @@ public final class CaptureService extends Service {
                         } return true;
                     case MotionEvent.ACTION_UP:
                         main.removeCallbacks(hold);
-                        if (moved) { ballParams.x=ballParams.x+ballParams.width/2<width/2 ? Ui.dp(CaptureService.this,6) : width-ballParams.width-Ui.dp(CaptureService.this,6); updateBall(); }
+                        if (moved) rememberBall();
                         else if (!longPressed) v.performClick(); return true;
-                    case MotionEvent.ACTION_CANCEL: main.removeCallbacks(hold); return true;
+                    case MotionEvent.ACTION_CANCEL: main.removeCallbacks(hold); if(moved) rememberBall(); return true;
                     default: return true;
                 }
             }
         });
         windows.addView(ball,ballParams);
     }
+    private void placeBall() {
+        if(ballParams==null) return;
+        int[] point=ballPosition.place(width,height,ballParams.width,ballParams.height,
+                Ui.dp(windowContext,6),Ui.dp(windowContext,24),Ui.dp(windowContext,32));
+        ballParams.x=point[0]; ballParams.y=point[1]; updateBall();
+    }
+    private void rememberBall() {
+        ballPosition.remember(ballParams.x,ballParams.y,width,height,ballParams.width,ballParams.height,
+                Ui.dp(windowContext,24),Ui.dp(windowContext,32));
+        placeBall();
+    }
     private void updateBall() { if (ball != null && ball.isAttachedToWindow()) { try { windows.updateViewLayout(ball,ballParams); } catch (Exception e) { stopSelf(); } } }
     private void clickBall() {
         if (gate.state()!=SessionGate.State.IDLE) { clearPage(); return; }
+        long tappedAt=System.nanoTime()/1_000_000,wallTime=System.currentTimeMillis();
         try {
+            syncDisplay();
+            if (tearingDown || reader==null) return;
             Settings settings=new Settings(this);
-            if (!settings.profile(settings.vision()).ready()) { toast("请回到漫译配置此模式的 API"); return; }
+            if (!settings.profile().ready()) { toast("请回到漫译配置 AI 截图翻译 API"); return; }
             long token=gate.begin();
-            pageStarted=SystemClock.elapsedRealtime();
-            overlay=new TranslationOverlay(this,() -> {
+            captureRequestToken=token;
+            activeTiming=new TranslationTiming(wallTime,tappedAt,() -> System.nanoTime()/1_000_000);
+            overlay=new TranslationOverlay(windowContext,() -> {
                 if(gate.state()==SessionGate.State.SHOWING || gate.state()==SessionGate.State.PEEKING) {
                     gate.togglePreview();
                     if(overlay!=null) overlay.peeking(gate.state()==SessionGate.State.PEEKING);
@@ -189,39 +243,66 @@ public final class CaptureService extends Service {
             captureToken=-2; ball.setVisibility(View.INVISIBLE);
             // Initially the transparent overlay only intercepts touches. No status pixels can enter the screenshot.
             overlay.progress("");
-            main.postDelayed(() -> {
-                if (!gate.current(token)) return;
-                captureToken=token;
-                captureTimeout=() -> { if (gate.current(token) && captureToken==token) fail("没有收到屏幕画面，请重新授权；受保护内容无法截取"); };
-                main.postDelayed(captureTimeout,4000);
-                imageAvailable(reader);
-            },220);
+            captureTimeout=() -> { if (gate.current(token) && screenshot==null) fail("没有收到屏幕画面，请重新授权；受保护内容无法截取"); };
+            main.postDelayed(captureTimeout,4000);
+            queueCapture(token,220);
         } catch(Exception e) { fail("无法显示翻译层，请检查悬浮窗权限"); }
     }
+    private void captureFrame(long token) {
+        if (!gate.current(token) || overlay==null || screenshot!=null) return;
+        if (overlay.getWidth()==0 || overlay.getHeight()==0) {
+            queueCapture(token,32); return;
+        }
+        Point size=screenSize();
+        if (size.x!=width || size.y!=height) {
+            try {
+                replaceSurface(size.x,size.y);
+                // Let MediaProjection redraw at the measured window size. Stretching
+                // the old letterboxed bitmap would also stretch the wrong AI coordinates.
+                queueCapture(token,220);
+            } catch(Exception e) { fail("屏幕尺寸变化，请重新截取"); }
+            return;
+        }
+        captureToken=token; imageAvailable(reader);
+    }
+    private void queueCapture(long token,long delay) {
+        if (captureAttempt!=null) main.removeCallbacks(captureAttempt);
+        captureToken=-2;
+        captureAttempt=() -> captureFrame(token);
+        main.postDelayed(captureAttempt,delay);
+    }
     private void startTranslation(long token) throws Exception {
-        Settings settings=new Settings(this); boolean vision=settings.vision(); String language=settings.source(); Settings.Profile profile=settings.profile(vision);
+        Settings settings=new Settings(this); Settings.Profile profile=settings.profile();
         Bitmap owned=screenshot.copy(Bitmap.Config.ARGB_8888,false);
-        TranslationEngine taskEngine=new TranslationEngine(ocr,translations).recordUsage(TokenUsageStore.get(this)); engine=taskEngine;
+        TranslationTiming timing=activeTiming;
+        TranslationEngine taskEngine=new TranslationEngine().recordUsage(TokenUsageStore.get(this)).recordTiming(timing); engine=taskEngine;
         jobTimeout=() -> { if(gate.current(token)) fail("本次处理超时，请检查网络或换一个模型后重试"); };
         main.postDelayed(jobTimeout,105000);
+        timing.enter(TranslationTiming.Stage.WORKER_WAIT);
         job=worker.submit(() -> {
             try {
-                List<TextRegion> result=taskEngine.translate(owned,vision,language,profile,message -> main.post(() -> { if(gate.current(token) && overlay!=null) overlay.progress(message); }));
+                timing.enter(TranslationTiming.Stage.IMAGE_PREPARE);
+                List<TextRegion> result=taskEngine.translate(owned,profile,message -> main.post(() -> { if(gate.current(token) && overlay!=null) overlay.progress(message); }));
+                timing.enter(TranslationTiming.Stage.UI_WAIT);
                 main.post(() -> {
                     if (!gate.current(token)) return;
                     if (jobTimeout!=null) main.removeCallbacks(jobTimeout);
-                    if(result.isEmpty()) { fail("没有识别到文字，可放大漫画或切换识别模式再试"); return; }
+                    if(result.isEmpty()) { fail("没有识别到文字，可放大画面或更换支持图片的模型再试"); return; }
                     if(gate.complete(token) && overlay!=null) {
-                        overlay.regions(result);
-                        String elapsed=TranslationEngine.seconds(SystemClock.elapsedRealtime()-pageStarted);
-                        overlay.completed("完成 · " + elapsed + " 秒");
-                        new Settings(CaptureService.this).saveLastTiming((vision ? "AI 识别" : "本机识别") + " · 总计 " + elapsed + " 秒\n" + taskEngine.timings());
-                        main.postDelayed(() -> { if(gate.current(token) && overlay!=null) overlay.completed(""); },4000);
+                        TranslationOverlay target=overlay;
+                        timing.enter(TranslationTiming.Stage.LAYOUT);
+                        target.regions(result);
+                        timing.enter(TranslationTiming.Stage.FRAME_WAIT);
+                        target.onFirstTranslationFrame(timing,() -> {
+                            if(activeTiming!=timing || overlay!=target) return;
+                            TranslationTiming.Record record=finishTiming(true);
+                            target.completed("完成 · " + TranslationEngine.seconds(record.totalMillis) + " 秒");
+                            main.postDelayed(() -> { if(overlay==target) target.completed(""); },4000);
+                        });
                     }
                 });
-            } catch(Exception e) { main.post(() -> {
+            } catch(Exception e) { timing.enter(TranslationTiming.Stage.UI_WAIT); main.post(() -> {
                 if(gate.current(token)) {
-                    new Settings(CaptureService.this).saveLastTiming("未完成 · " + taskEngine.stage() + " · " + TranslationEngine.seconds(SystemClock.elapsedRealtime()-pageStarted) + " 秒\n" + taskEngine.timings());
                     fail(TranslationEngine.error(e));
                 }
             }); }
@@ -229,8 +310,19 @@ public final class CaptureService extends Service {
         });
     }
     private void fail(String message) { clearPage(); toast(message); }
+    private TranslationTiming.Record finishTiming(boolean frameDrawn) {
+        if(activeTiming==null) return null;
+        TranslationTiming.Record record=activeTiming.finish(frameDrawn); activeTiming=null;
+        if(record!=null) {
+            try { TranslationTimingStore.get(this).record(record); }
+            catch(android.database.SQLException e) { toast("本次耗时记录未能保存"); }
+        }
+        return record;
+    }
     private void clearPage() {
-        gate.reset(); captureToken=-1;
+        finishTiming(false);
+        gate.reset(); captureToken=-1; captureRequestToken=-1;
+        if(captureAttempt!=null) main.removeCallbacks(captureAttempt);
         if(captureTimeout!=null) main.removeCallbacks(captureTimeout);
         if(jobTimeout!=null) main.removeCallbacks(jobTimeout);
         if(engine!=null) { engine.cancel(); engine=null; }
@@ -241,25 +333,55 @@ public final class CaptureService extends Service {
     }
     private void resize(int w,int h) {
         if(tearingDown || display==null) return;
-        clearPage();
+        boolean pending=overlay!=null && screenshot==null && gate.current(captureRequestToken);
+        // Resizing a surface can itself trigger another projection size callback.
+        // Keep the user's pending capture alive until that surface has settled.
+        if(!pending) clearPage();
         try {
-            ImageReader old=reader; width=w; height=h; reader=newReader(w,h);
-            display.resize(w,h,getResources().getConfiguration().densityDpi); display.setSurface(reader.getSurface()); old.close();
-            if(ballParams!=null) { ballParams.x=Math.min(ballParams.x,width-ballParams.width); ballParams.y=Math.min(ballParams.y,height-ballParams.height-Ui.dp(this,32)); updateBall(); }
+            replaceSurface(w,h);
+            if(pending) queueCapture(captureRequestToken,220);
+            placeBall();
         } catch(Exception e) { toast("屏幕尺寸变化，请重新开启漫译"); stopSelf(); }
     }
+    private void replaceSurface(int w,int h) {
+        ImageReader next=newReader(w,h);
+        try {
+            // Pause mirroring before changing both logical and surface dimensions, so
+            // the old surface's letterbox transform cannot bleed into the new reader.
+            display.setSurface(null);
+            display.resize(w,h,windowContext.getResources().getConfiguration().densityDpi);
+            display.setSurface(next.getSurface());
+        } catch(RuntimeException e) { next.close(); throw e; }
+        ImageReader old=reader; reader=next; width=w; height=h;
+        old.setOnImageAvailableListener(null,null); old.close();
+    }
+    private boolean syncDisplay() {
+        if (tearingDown || display==null) return false;
+        Point size=screenSize(); int currentRotation=windows.getDefaultDisplay().getRotation();
+        boolean sizeChanged=size.x!=width || size.y!=height;
+        if (!sizeChanged && currentRotation==rotation) return false;
+        rotation=currentRotation;
+        if (sizeChanged) resize(size.x,size.y);
+        else if (overlay!=null && screenshot==null && gate.current(captureRequestToken)) queueCapture(captureRequestToken,220);
+        else clearPage(); // A 180-degree turn also invalidates the frozen frame.
+        placeBall();
+        return true;
+    }
     @Override public void onConfigurationChanged(Configuration config) {
-        super.onConfigurationChanged(config); Point size=screenSize(); if(size.x!=width || size.y!=height) resize(size.x,size.y);
+        super.onConfigurationChanged(config);
+        // Read after the window context has received its own configuration update.
+        main.post(() -> syncDisplay());
     }
     @Override public void onDestroy() {
         tearingDown=true; running=false; clearPage(); gate.stop(); main.removeCallbacksAndMessages(null);
+        if(displays!=null) displays.unregisterDisplayListener(displayListener);
         if(navigationRegistered) { unregisterReceiver(navigationReceiver); navigationRegistered=false; }
         TranslationTileService.refresh(this);
         if(ball!=null && ball.isAttachedToWindow()) windows.removeViewImmediate(ball);
         if(display!=null) display.release();
         if(reader!=null) reader.close();
         if(projection!=null) { projection.unregisterCallback(projectionCallback); projection.stop(); }
-        ocr.close(); translations.close(); worker.shutdownNow(); stopForeground(STOP_FOREGROUND_REMOVE); super.onDestroy();
+        worker.shutdownNow(); stopForeground(STOP_FOREGROUND_REMOVE); super.onDestroy();
     }
     private void toast(String value) { Toast.makeText(this,value,Toast.LENGTH_LONG).show(); }
     @Override public IBinder onBind(Intent intent) { return null; }

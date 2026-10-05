@@ -2,94 +2,161 @@ package com.mangaglass.app;
 
 import android.content.Context;
 import android.graphics.*;
-import android.text.Layout;
-import android.text.StaticLayout;
 import android.text.TextPaint;
+import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.widget.*;
 import java.util.ArrayList;
 import java.util.List;
 
 /** A touch-consuming frozen page. PEEKING changes painting, never window touch flags. */
-public final class TranslationOverlay extends View {
+public final class TranslationOverlay extends FrameLayout {
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final TextPaint text = new TextPaint(Paint.ANTI_ALIAS_FLAG);
-    private final TextPaint paragraphFont = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final List<Label> labels = new ArrayList<>();
+    private final List<TextRegion> unplaced = new ArrayList<>();
     private final int[] screenLocation = new int[2];
+    private final Rect bitmapBounds = new Rect();
     private Bitmap screenshot;
-    private boolean peeking;
-    private boolean screenCoordinates = true;
+    private boolean peeking, screenCoordinates = true;
     private String message = "正在截取画面…";
     private boolean busy = true;
     private long stageStarted = android.os.SystemClock.elapsedRealtime();
     private float downX, downY;
-    private boolean moved;
+    private boolean moved, longPressed;
+    private Label pressed;
+    private View reader;
+    private Button unplacedButton;
+    private TranslationTiming frameTiming;
+    private Runnable frameFinished;
     private final Runnable toggle;
+    private final Runnable hold = () -> {
+        if (!moved && pressed != null && !busy && !peeking) {
+            longPressed = true; showReader(pressed);
+            performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
+        }
+    };
     public TranslationOverlay(Context context) { this(context, () -> {}); }
     public TranslationOverlay(Context context, Runnable toggle) {
-        super(context); this.toggle = toggle; setClickable(true); setContentDescription("翻译画面，点按切换原图预览，点击悬浮球退出");
-        setLayerType(View.LAYER_TYPE_SOFTWARE,null);
+        super(context); this.toggle = toggle; setWillNotDraw(false); setClickable(true);
+        setContentDescription("翻译画面，点按切换原图预览，点击悬浮球退出");
+        setLayerType(View.LAYER_TYPE_SOFTWARE, null);
     }
-    public void screenshot(Bitmap bitmap) { screenshot = bitmap; invalidate(); }
-    public void screenCoordinates(boolean value) { screenCoordinates = value; }
+    public void screenshot(Bitmap bitmap) {
+        frameTiming=null; frameFinished=null;
+        screenshot = bitmap; bitmapBounds.set(0,0,bitmap.getWidth(),bitmap.getHeight());
+        labels.clear(); unplaced.clear(); removeUnplacedButton(); closeReader(); invalidate();
+    }
+    public void screenCoordinates(boolean value) {
+        screenCoordinates = value; screenLocation[0] = 0; screenLocation[1] = 0; invalidate();
+    }
     public void progress(String value) { message = value; busy = true; stageStarted = android.os.SystemClock.elapsedRealtime(); setContentDescription("翻译处理中，点击悬浮球取消"); invalidate(); }
     public void completed(String value) { message = value; busy = false; invalidate(); }
-    public void peeking(boolean value) { peeking = value; setContentDescription(value ? "原图预览，点画面恢复译文" : "译文覆盖，点画面预览原图"); invalidate(); }
-    public void regions(List<TextRegion> regions) {
-        labels.clear();
-        if (screenshot == null) return;
-        float fontSize = android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP,16,getResources().getDisplayMetrics());
-        paragraphFont.setTypeface(Typeface.create("sans-serif",Typeface.NORMAL));
-        paragraphFont.setTextSize(fontSize); paragraphFont.setColor(0xff202723);
-        Paint.FontMetrics metrics = paragraphFont.getFontMetrics();
-        float lineHeight = (float)Math.ceil((metrics.descent-metrics.ascent)*1.12f);
-        List<ParagraphLayout.Paragraph> paragraphs = new ArrayList<>();
-        for (TextRegion region : regions) {
-            Rect r=region.bounds;
-            paragraphs.add(new ParagraphLayout.Paragraph(new int[]{r.left,r.top,r.right,r.bottom},region.translated));
+    void onFirstTranslationFrame(TranslationTiming timing,Runnable finished) {
+        frameTiming=timing; frameFinished=finished; invalidate();
+    }
+    @Override public void draw(Canvas canvas) {
+        TranslationTiming timing=!busy && !peeking && screenshot!=null && !screenshot.isRecycled() ? frameTiming : null;
+        Runnable finished=frameFinished;
+        if(timing!=null) {
+            frameTiming=null; frameFinished=null;
+            timing.enter(TranslationTiming.Stage.DRAW);
         }
-        List<ParagraphLayout.Placement> placements=ParagraphLayout.arrange(paragraphs,screenshot.getWidth(),screenshot.getHeight(),fontSize,lineHeight,paragraphFont::measureText);
-        for(int i=0;i<regions.size();i++) labels.add(new Label(regions.get(i).bounds,background(regions.get(i).bounds),placements.get(i)));
-        message=""; busy=false; peeking(false);
+        super.draw(canvas);
+        // Include the bitmap, labels and child views. This is CPU drawing completion,
+        // not a claim about the later compositor/physical display presentation time.
+        if(timing!=null && finished!=null) finished.run();
+    }
+    public void peeking(boolean value) {
+        closeReader(); peeking = value;
+        if(unplacedButton!=null) unplacedButton.setVisibility(value ? View.GONE : View.VISIBLE);
+        setContentDescription(value ? "原图预览，点画面恢复译文" : "译文覆盖，点画面预览原图"); invalidate();
+    }
+    public void regions(List<TextRegion> regions) {
+        labels.clear(); unplaced.clear(); removeUnplacedButton(); closeReader();
+        if (screenshot == null || screenshot.isRecycled()) return;
+        int width = screenshot.getWidth(), height = screenshot.getHeight();
+        float preferredSize = Math.min(android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, 16,
+                getResources().getDisplayMetrics()), Math.min(width, height) * .045f);
+        List<TextRegion> valid = new ArrayList<>();
+        List<int[]> occupied = new ArrayList<>();
+        for (TextRegion region : regions) {
+            Rect r = new Rect(region.bounds);
+            if (region.translated.trim().isEmpty()) continue;
+            if (r.isEmpty() || !r.intersect(0,0,width,height)) { unplaced.add(region); continue; }
+            valid.add(new TextRegion(r, region.source, region.translated));
+            occupied.add(new int[]{r.left, r.top, r.right, r.bottom});
+        }
+        for (int i = 0; i < valid.size(); i++) {
+            TextRegion region = valid.get(i);
+            int[] anchor = occupied.get(i);
+            int top = background(region.bounds, region.bounds.top), bottom = background(region.bounds, region.bounds.bottom - 1);
+            // White bubbles stay white. Dark game panels retain their vertical background gradient.
+            if (luminance(top) > 215 && luminance(bottom) > 215) top = bottom = Color.WHITE;
+            int foreground = (luminance(top) + luminance(bottom)) / 2 < 145 ? Color.WHITE : 0xff202723;
+            float readable=Math.max(10,preferredSize*.75f);
+            ParagraphLayout.Placement placement=ParagraphLayout.fit(region.translated,region.bounds,preferredSize,readable,foreground);
+            // Use the original box when it is already readable. Claim only enough nearby
+            // blank background to avoid shrinking the font by more than about 10%.
+            for(float growth:new float[]{.25f,.5f,.75f,1f}) {
+                if(placement.fontSize>=preferredSize*.9f) break;
+                int[] expanded=BubbleGeometry.expand(anchor,width,height,screenshot::getPixel,occupied.toArray(new int[0][]),growth,top,bottom);
+                Rect area=new Rect(expanded[0],expanded[1],expanded[2],expanded[3]);
+                ParagraphLayout.Placement candidate=ParagraphLayout.fit(region.translated,area,preferredSize,readable,foreground);
+                if(candidate.fontSize>placement.fontSize+.05f) placement=candidate;
+            }
+            Rect reserved=placement.bounds;
+            occupied.add(new int[]{reserved.left,reserved.top,reserved.right,reserved.bottom});
+            labels.add(new Label(placement, top, bottom));
+        }
+        if(!unplaced.isEmpty()) {
+            unplacedButton=Ui.button(getContext(),"未定位译文 · "+unplaced.size()+" 处",false);
+            unplacedButton.setOnClickListener(v -> showUnplaced());
+            FrameLayout.LayoutParams params=new FrameLayout.LayoutParams(-2,-2,Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);
+            params.bottomMargin=Ui.dp(getContext(),48); addView(unplacedButton,params);
+        }
+        message = ""; busy = false; peeking(false);
     }
     List<ParagraphLayout.Placement> layoutSnapshot() {
-        List<ParagraphLayout.Placement> result=new ArrayList<>();
-        for(Label label:labels) result.add(label.layout);
+        List<ParagraphLayout.Placement> result = new ArrayList<>();
+        for (Label label : labels) result.add(label.layout);
         return result;
     }
-    private int background(Rect rect) {
-        // Median of sampled border pixels avoids treating a black outline or glyph as the bubble fill.
+    private int background(Rect rect, int row) {
         List<Integer> colors = new ArrayList<>();
-        for (int i=0;i<20;i++) {
-            int x = Math.min(screenshot.getWidth()-1,Math.max(0,rect.left + i*Math.max(1,rect.width()-1)/19));
-            int y1 = Math.max(0,rect.top-2), y2 = Math.min(screenshot.getHeight()-1,rect.bottom+1);
-            colors.add(screenshot.getPixel(x,y1)); colors.add(screenshot.getPixel(x,y2));
+        for (int dy = -2; dy <= 2; dy++) {
+            int y = Math.max(0, Math.min(screenshot.getHeight() - 1, row + dy));
+            for (int distance = 2; distance <= 6; distance += 2) {
+                colors.add(screenshot.getPixel(Math.max(0, rect.left - distance), y));
+                colors.add(screenshot.getPixel(Math.min(screenshot.getWidth() - 1, rect.right + distance - 1), y));
+            }
         }
         colors.sort(java.util.Comparator.comparingInt(TranslationOverlay::luminance));
-        return colors.get(colors.size()*2/3) | 0xff000000;
+        return colors.get(colors.size() / 2) | 0xff000000;
     }
     private static int luminance(int c) { return (((c>>16)&255)*3 + ((c>>8)&255)*6 + (c&255))/10; }
     @Override protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
+        paint.setShader(null); paint.setStyle(Paint.Style.FILL); paint.setAlpha(255);
         if (screenCoordinates) getLocationOnScreen(screenLocation);
         if (screenshot != null && !screenshot.isRecycled()) {
-            canvas.save(); canvas.translate(-screenLocation[0],-screenLocation[1]);
-            canvas.drawBitmap(screenshot,0,0,paint);
+            canvas.save(); canvas.translate(-screenLocation[0], -screenLocation[1]);
+            // An explicit pixel rectangle bypasses bitmap/canvas density scaling, so
+            // the image, AI boxes and hit targets all share the same coordinates.
+            canvas.drawBitmap(screenshot, null, bitmapBounds, paint);
             if (!peeking) {
-                // Erase every original region first; a later mask must not erase an earlier paragraph.
-                for(Label label:labels) {
-                    paint.setColor(label.color); paint.setStyle(Paint.Style.FILL);
-                    canvas.drawRect(label.bounds.left-2,label.bounds.top-2,label.bounds.right+2,label.bounds.bottom+2,paint);
+                for (Label label : labels) {
+                    Rect b = label.layout.bounds;
+                    paint.setShader(label.background);
+                    canvas.drawRect(b, paint);
                 }
-                for(Label label:labels) {
-                    ParagraphLayout.Placement p=label.layout;
-                    paint.setColor(Color.WHITE); canvas.drawRect(p.left,p.top,p.right,p.bottom,paint);
-                    float baseline=p.top+p.padding-paragraphFont.getFontMetrics().ascent;
-                    for(String line:p.lines) {
-                        canvas.drawText(line,p.left+p.padding,baseline,paragraphFont); baseline+=p.lineHeight;
-                    }
+                paint.setShader(null);
+                for (Label label : labels) {
+                    ParagraphLayout.Placement p = label.layout;
+                    canvas.save(); canvas.clipRect(p.bounds); canvas.translate(p.textLeft, p.textTop);
+                    p.text.draw(canvas); canvas.restore();
                 }
             }
             canvas.restore();
@@ -105,6 +172,7 @@ public final class TranslationOverlay extends View {
             chip(canvas,label,Ui.dp(getContext(),70));
             if (busy) postInvalidateDelayed(1000);
         }
+        if (reader != null) { paint.setColor(0x99000000); canvas.drawRect(0,0,getWidth(),getHeight(),paint); }
     }
     private void chip(Canvas canvas,String label,float y) {
         text.setTextSize(Ui.dp(getContext(),12)); text.setColor(Color.WHITE); text.setTypeface(Typeface.DEFAULT);
@@ -115,21 +183,80 @@ public final class TranslationOverlay extends View {
         canvas.save(); canvas.clipRect(left+8,y,left+width-8,y+Ui.dp(getContext(),36));
         canvas.drawText(label,(getWidth()-text.measureText(label))/2,y+Ui.dp(getContext(),23),text); canvas.restore();
     }
+    private Label labelAt(float x, float y) {
+        if (screenCoordinates) getLocationOnScreen(screenLocation);
+        for (Label label : labels) if (label.layout.bounds.contains((int)(x + screenLocation[0]), (int)(y + screenLocation[1]))) return label;
+        return null;
+    }
+    private void showReader(Label label) {
+        showReader("完整译文",label.layout.fullText);
+    }
+    private void showUnplaced() {
+        StringBuilder content=new StringBuilder();
+        for(int i=0;i<unplaced.size();i++) {
+            TextRegion region=unplaced.get(i);
+            if(i>0) content.append("\n\n");
+            content.append(i+1).append(". ");
+            if(!region.source.isEmpty()) content.append(region.source).append("\n");
+            content.append(region.translated);
+        }
+        showReader("未定位译文",content.toString());
+    }
+    private void removeUnplacedButton() {
+        if(unplacedButton!=null) { removeView(unplacedButton); unplacedButton=null; }
+    }
+    private void showReader(String title,String fullText) {
+        closeReader();
+        LinearLayout panel = Ui.column(getContext()); panel.setBackground(Ui.shape(Color.WHITE, 12, getContext()));
+        int padding = Ui.dp(getContext(), 18); panel.setPadding(padding, padding, padding, padding); panel.setClickable(true);
+        panel.addView(Ui.text(getContext(), title, 18, Ui.INK, true));
+        ScrollView scroll = new ScrollView(getContext()); scroll.setFillViewport(true);
+        TextView content = Ui.text(getContext(), fullText, 18, Ui.INK, false);
+        content.setPadding(0, padding, 0, padding); content.setLineSpacing(0, 1.15f); scroll.addView(content);
+        panel.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        Button close = Ui.button(getContext(), "返回译文", false); close.setOnClickListener(v -> closeReader()); panel.addView(close);
+        reader = panel;
+        if(unplacedButton!=null) unplacedButton.setVisibility(View.GONE);
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                Math.max(1, Math.min(getWidth() - padding * 2, Ui.dp(getContext(), 600))),
+                Math.max(1, Math.min(getHeight() - padding * 2, Ui.dp(getContext(), 560))), Gravity.CENTER);
+        addView(reader, params); invalidate();
+    }
+    private void closeReader() {
+        if (reader != null) { removeView(reader); reader = null; invalidate(); }
+        if(unplacedButton!=null) unplacedButton.setVisibility(peeking ? View.GONE : View.VISIBLE);
+    }
     @Override public boolean onTouchEvent(MotionEvent event) {
         switch (event.getActionMasked()) {
-            case MotionEvent.ACTION_DOWN: downX = event.getX(); downY = event.getY(); moved = false; return true;
-            case MotionEvent.ACTION_MOVE:
-                if (Math.hypot(event.getX()-downX,event.getY()-downY)>ViewConfiguration.get(getContext()).getScaledTouchSlop()) moved = true;
+            case MotionEvent.ACTION_DOWN:
+                downX = event.getX(); downY = event.getY(); moved = false; longPressed = false;
+                pressed = !busy && !peeking && reader == null ? labelAt(downX, downY) : null;
+                if (pressed != null) postDelayed(hold, ViewConfiguration.getLongPressTimeout());
                 return true;
-            case MotionEvent.ACTION_POINTER_DOWN: moved = true; return true;
-            case MotionEvent.ACTION_UP: if (!moved) performClick(); return true;
+            case MotionEvent.ACTION_MOVE:
+                if (Math.hypot(event.getX()-downX,event.getY()-downY)>ViewConfiguration.get(getContext()).getScaledTouchSlop()) { moved = true; removeCallbacks(hold); }
+                return true;
+            case MotionEvent.ACTION_POINTER_DOWN: moved = true; removeCallbacks(hold); return true;
+            case MotionEvent.ACTION_UP:
+                removeCallbacks(hold);
+                if (!moved && !longPressed) {
+                    if (reader != null) closeReader();
+                    else if (pressed != null && pressed.layout.needsReader) showReader(pressed);
+                    else performClick();
+                }
+                pressed = null; return true;
+            case MotionEvent.ACTION_CANCEL: removeCallbacks(hold); pressed = null; return true;
             default: return true;
         }
     }
     @Override public boolean performClick() { super.performClick(); toggle.run(); return true; }
-    public void release() { screenshot = null; labels.clear(); }
+    public void release() { frameTiming=null; frameFinished=null; removeCallbacks(hold); pressed = null; closeReader(); removeUnplacedButton(); unplaced.clear(); screenshot = null; labels.clear(); }
     private static final class Label {
-        final Rect bounds; final int color; final ParagraphLayout.Placement layout;
-        Label(Rect bounds,int color,ParagraphLayout.Placement layout) { this.bounds=bounds; this.color=color; this.layout=layout; }
+        final ParagraphLayout.Placement layout;
+        final Shader background;
+        Label(ParagraphLayout.Placement layout, int topColor, int bottomColor) {
+            this.layout=layout;
+            background=new LinearGradient(0,layout.bounds.top,0,layout.bounds.bottom,topColor,bottomColor,Shader.TileMode.CLAMP);
+        }
     }
 }

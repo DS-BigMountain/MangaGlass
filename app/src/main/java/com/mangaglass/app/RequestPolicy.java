@@ -29,6 +29,12 @@ public final class RequestPolicy {
     }
     public static String apply(String body, String url, String model, String preference, ModelCatalog.Model info) throws Exception {
         JSONObject request = new JSONObject(body);
+        // A thinking-protocol override does not imply support for JSON mode on a gateway.
+        // Enable the documented capability only for screenshot requests to this provider.
+        String host=URI.create(TranslationProtocol.endpoint(url)).getHost();
+        if("api.deepseek.com".equalsIgnoreCase(host) && hasImage(request) && !request.has("response_format")) {
+            request.put("response_format",new JSONObject().put("type","json_object"));
+        }
         String policy = resolve(url, model, preference);
         switch (policy) {
             case "deepseek": request.put("thinking", new JSONObject().put("type", "disabled")); break;
@@ -56,6 +62,20 @@ public final class RequestPolicy {
             default: break;
         }
         return request.toString();
+    }
+    private static boolean hasImage(JSONObject request) {
+        JSONArray messages=request.optJSONArray("messages");
+        if(messages==null) return false;
+        for(int i=0;i<messages.length();i++) {
+            JSONObject message=messages.optJSONObject(i);
+            JSONArray parts=message==null ? null : message.optJSONArray("content");
+            if(parts==null) continue;
+            for(int j=0;j<parts.length();j++) {
+                JSONObject part=parts.optJSONObject(j);
+                if(part!=null && "image_url".equals(part.optString("type"))) return true;
+            }
+        }
+        return false;
     }
     public static String description(String url, String model, String preference) {
         String policy;
