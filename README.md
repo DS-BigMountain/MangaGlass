@@ -48,10 +48,10 @@ Token 用量只累加接口实际返回的 usage，不估算费用，也不能�
 .\scripts\build.ps1
 ```
 
-也可直接运行 `./gradlew :app:assembleRelease :app:lintRelease`。产物为 `app/build/outputs/apk/release/app-release-unsigned.apk`，需使用自己的密钥签名后安装。密钥、本机 SDK、缓存和安装包不进入仓库。
+也可直接运行 `./gradlew :app:assembleRelease`。产物为 `app/build/outputs/apk/release/app-release-unsigned.apk`，需使用自己的密钥签名后安装。密钥、本机 SDK、缓存和安装包不进入仓库。
 
 ## 发布资源
 
-V1.1 提供关闭调试的 release APK、对应源码 ZIP 和 SHA-256 校验文件。APK 内部版本为 1.1（9），沿用历史 Android Debug 证书以支持覆盖安装；release 构建类型不代表更换了商店发行签名。自行重签的包不能直接覆盖已安装的旧签名版本。
+V1.1 提供关闭调试的 release APK 和对应源码 ZIP。APK 内部版本为 1.1（9），沿用历史 Android Debug 证书以支持覆盖安装；release 构建类型不代表更换了商店发行签名。自行重签的包不能直接覆盖已安装的旧签名版本。
 
-仓库和源码包只包含应用源码、资源、必要构建文件及本说明，不包含测试源码、演示页面、压测脚本、测试图片、日志或 API 密钥。
+本地发布文件统一放在 `__release_packages__/1.1/`。仓库和源码包包含应用源码、资源、必要构建文件及本说明，安装包通过 GitHub Release 提供。本机配置与 API 密钥不进入仓库。
