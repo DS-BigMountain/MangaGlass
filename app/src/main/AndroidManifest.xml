@@ -15,7 +15,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity android:name=".SampleActivity" android:exported="false" />
         <service android:name=".CaptureService" android:exported="false"
             android:foregroundServiceType="mediaProjection" />
         <service android:name=".TranslationTileService" android:label="漫译" android:icon="@drawable/ic_tile"
