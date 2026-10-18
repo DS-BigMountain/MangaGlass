@@ -49,12 +49,13 @@ public final class BubbleGeometry {
     }
     private static boolean blankEdge(int[] b, int side, Pixels pixels, int[] source, int topColor, int bottomColor, boolean lightBackground) {
         int length = side % 2 == 0 ? b[3] - b[1] : b[2] - b[0];
-        int dark = 0, total = 0;
-        for (int i = 0; i < length; i += Math.max(1, length / 100)) {
+        int total = 0;
+        // Inspect every pixel. Sparse sampling and a dark-pixel allowance can cross thin outlines.
+        for (int i = 0; i < length; i++) {
             int x = side % 2 == 0 ? (side == 0 ? b[0] : b[2] - 1) : b[0] + i;
             int y = side % 2 == 1 ? (side == 1 ? b[1] : b[3] - 1) : b[1] + i;
             int color = pixels.at(x, y);
-            if(lightBackground) { if(!light(color)) dark++; }
+            if(lightBackground) { if(!light(color)) return false; }
             else {
                 float fraction=Math.max(0,Math.min(1,(y-source[1])/(float)Math.max(1,source[3]-source[1]-1)));
                 boolean matches=true;
@@ -63,10 +64,10 @@ public final class BubbleGeometry {
                     int expected=Math.round(a+(bottom-a)*fraction);
                     if(Math.abs(((color>>shift)&255)-expected)>18) matches=false;
                 }
-                if(!matches) dark++;
+                if(!matches) return false;
             }
             total++;
         }
-        return total > 0 && dark <= total / 40;
+        return total > 0;
     }
 }

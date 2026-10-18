@@ -27,6 +27,8 @@ public final class VisionProtocol {
                 + "with origin top-left. Box must tightly enclose the ORIGINAL text (all rows and columns), not the translated text, whole panel or character. "
                 + "For a wide paragraph preserve its complete original width and height; never turn it into a narrow column. "
                 + "Check each box against the actual text position in the entire screenshot, including borders. "
+                + "Include punctuation and every outermost glyph, but exclude the speech bubble outline and tail. "
+                + "Boxes for different regions must not overlap. Never split one bubble into several overlapping boxes. "
                 + "Do not enclose faces or art. Empty regions array if no text. No markdown, no commentary. "
                 + "Chinese translations must be concise, faithful horizontal prose without forced line breaks; do not omit meaning. The app handles wrapping. "
                 + (width>0 && height>0 ? "The supplied screenshot is "+width+" by "+height+" pixels; these dimensions are NOT the coordinate range. Always use 0..1000 for box coordinates." : "");

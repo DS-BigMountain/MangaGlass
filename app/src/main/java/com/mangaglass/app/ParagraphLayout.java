@@ -29,12 +29,16 @@ public final class ParagraphLayout {
         return value.replaceAll("[\\r\\n\\u2028\\u2029]+"," ").replaceAll("[\\t ]+"," ").trim();
     }
     public static Placement fit(String value, Rect bounds, float preferredSize, float readableSize, int color) {
+        return fit(value,bounds,preferredSize,readableSize,color,
+                bounds.height()>bounds.width()*.85f || value.codePointCount(0,value.length())<24);
+    }
+    static Placement fit(String value, Rect bounds, float preferredSize, float readableSize, int color, boolean centered) {
         if (bounds.isEmpty()) throw new IllegalArgumentException("Empty translation bounds");
         String fullText = normalize(value);
-        int padding = Math.max(0, Math.min(Math.round(preferredSize * .12f), Math.round(Math.min(bounds.width(), bounds.height()) * .06f)));
+        readableSize=Math.max(1,Math.min(preferredSize,readableSize));
+        int padding = Math.max(0, Math.min(Math.round(preferredSize * .24f), Math.round(Math.min(bounds.width(), bounds.height()) * .08f)));
         padding = Math.min(padding, (Math.min(bounds.width(), bounds.height()) - 1) / 2);
         int width = Math.max(1, bounds.width() - 2 * padding), height = Math.max(1, bounds.height() - 2 * padding);
-        boolean centered = bounds.height() > bounds.width() * .85f || fullText.codePointCount(0, fullText.length()) < 24;
         Layout.Alignment alignment = centered ? Layout.Alignment.ALIGN_CENTER : Layout.Alignment.ALIGN_NORMAL;
         StaticLayout best = create(fullText, width, preferredSize, color, alignment);
         if (!fits(best, width, height)) {
@@ -43,21 +47,33 @@ public final class ParagraphLayout {
         }
         if (!fits(best, width, height)) {
             // Test actual line heights, font padding and advances, including fallback fonts.
-            float low = .1f, high = preferredSize;
+            float low = readableSize, high = preferredSize;
             best = create(fullText, width, low, color, alignment,1f);
-            for (int i = 0; i < 14; i++) {
+            for (int i = 0; i < 10 && fits(best,width,height); i++) {
                 float size = (low + high) / 2;
                 StaticLayout candidate = create(fullText, width, size, color, alignment,1f);
                 if (fits(candidate, width, height)) { low = size; best = candidate; }
                 else high = size;
             }
         }
-        boolean needsReader = best.getPaint().getTextSize() < readableSize;
-        if (!fits(best, width, height)) {
-            // An implausibly small AI box cannot contain thousands of glyphs. An explicit marker
-            // opens the complete text; never silently ellipsize or paint outside the region.
-            needsReader = true;
-            best = create("…", width, .1f, color, Layout.Alignment.ALIGN_CENTER);
+        boolean needsReader = !fits(best, width, height);
+        if (needsReader) {
+            // Keep a readable preview and an explicit entry to the complete translation.
+            // A marker that cannot fit at the minimum size becomes an unplaced translation.
+            String suffix="… 点击展开";
+            best=create(suffix,width,readableSize,color,alignment,1f);
+            if(!fits(best,width,height)) {
+                suffix="…"; best=create(suffix,width,readableSize,color,alignment,1f);
+            }
+            if(fits(best,width,height)) {
+                int low=0,high=fullText.codePointCount(0,fullText.length());
+                while(low<high) {
+                    int count=(low+high+1)/2;
+                    StaticLayout candidate=create(fullText.substring(0,fullText.offsetByCodePoints(0,count))+suffix,
+                            width,readableSize,color,alignment,1f);
+                    if(fits(candidate,width,height)) { low=count; best=candidate; } else high=count-1;
+                }
+            } else best=create("",width,readableSize,color,alignment,1f);
         }
         return new Placement(bounds, padding, best, fullText, centered, needsReader);
     }
@@ -82,7 +98,10 @@ public final class ParagraphLayout {
         StaticLayout.Builder builder = StaticLayout.Builder.obtain(value, 0, value.length(), font, Math.max(1, width))
                 .setAlignment(alignment).setTextDirection(TextDirectionHeuristics.FIRSTSTRONG_LTR)
                 .setIncludePad(true).setLineSpacing(0, spacing)
-                .setBreakStrategy(android.graphics.text.LineBreaker.BREAK_STRATEGY_HIGH_QUALITY).setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE);
+                .setBreakStrategy(alignment==Layout.Alignment.ALIGN_CENTER
+                        ? android.graphics.text.LineBreaker.BREAK_STRATEGY_BALANCED
+                        : android.graphics.text.LineBreaker.BREAK_STRATEGY_HIGH_QUALITY)
+                .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE);
         if (Build.VERSION.SDK_INT >= 28) builder.setUseLineSpacingFromFallbacks(true);
         return builder.build();
     }

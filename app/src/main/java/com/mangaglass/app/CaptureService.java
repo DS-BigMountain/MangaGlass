@@ -275,6 +275,7 @@ public final class CaptureService extends Service {
         Settings settings=new Settings(this); Settings.Profile profile=settings.profile();
         Bitmap owned=screenshot.copy(Bitmap.Config.ARGB_8888,false);
         TranslationTiming timing=activeTiming;
+        float preferredSize=overlay.preferredSize();
         TranslationEngine taskEngine=new TranslationEngine().recordUsage(TokenUsageStore.get(this)).recordTiming(timing); engine=taskEngine;
         jobTimeout=() -> { if(gate.current(token)) fail("本次处理超时，请检查网络或换一个模型后重试"); };
         main.postDelayed(jobTimeout,105000);
@@ -283,6 +284,8 @@ public final class CaptureService extends Service {
             try {
                 timing.enter(TranslationTiming.Stage.IMAGE_PREPARE);
                 List<TextRegion> result=taskEngine.translate(owned,profile,message -> main.post(() -> { if(gate.current(token) && overlay!=null) overlay.progress(message); }));
+                timing.enter(TranslationTiming.Stage.LAYOUT);
+                OverlayLayout prepared=OverlayLayout.prepare(owned,result,preferredSize);
                 timing.enter(TranslationTiming.Stage.UI_WAIT);
                 main.post(() -> {
                     if (!gate.current(token)) return;
@@ -290,8 +293,7 @@ public final class CaptureService extends Service {
                     if(result.isEmpty()) { fail("没有识别到文字，可放大画面或更换支持图片的模型再试"); return; }
                     if(gate.complete(token) && overlay!=null) {
                         TranslationOverlay target=overlay;
-                        timing.enter(TranslationTiming.Stage.LAYOUT);
-                        target.regions(result);
+                        target.prepared(prepared);
                         timing.enter(TranslationTiming.Stage.FRAME_WAIT);
                         target.onFirstTranslationFrame(timing,() -> {
                             if(activeTiming!=timing || overlay!=target) return;

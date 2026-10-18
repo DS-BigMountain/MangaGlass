@@ -7,8 +7,9 @@ android {
         applicationId = "com.mangaglass.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "1.1"
+        versionCode = 10
+        versionName = "1.1.1"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -20,4 +21,7 @@ android {
 
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }
