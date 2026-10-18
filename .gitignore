@@ -26,6 +26,8 @@
 !/app/src/
 /app/src/*
 !/app/src/main/
+!/app/src/test/
+!/app/src/androidTest/
 
 # Generated files, local settings and credentials.
 **/build/

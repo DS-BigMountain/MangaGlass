@@ -10,6 +10,7 @@ import android.view.ViewConfiguration;
 import android.widget.*;
 import java.util.ArrayList;
 import java.util.List;
+import com.mangaglass.app.OverlayLayout.Label;
 
 /** A touch-consuming frozen page. PEEKING changes painting, never window touch flags. */
 public final class TranslationOverlay extends FrameLayout {
@@ -75,44 +76,22 @@ public final class TranslationOverlay extends FrameLayout {
         setContentDescription(value ? "原图预览，点画面恢复译文" : "译文覆盖，点画面预览原图"); invalidate();
     }
     public void regions(List<TextRegion> regions) {
+        if(screenshot==null || screenshot.isRecycled()) return;
+        try { prepared(OverlayLayout.prepare(screenshot,regions,preferredSize())); }
+        catch(InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+    }
+    float preferredSize() {
+        int width=screenshot==null ? getResources().getDisplayMetrics().widthPixels : screenshot.getWidth();
+        int height=screenshot==null ? getResources().getDisplayMetrics().heightPixels : screenshot.getHeight();
+        return Math.min(android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP,16,
+                getResources().getDisplayMetrics()),Math.min(width,height)*.045f);
+    }
+    void prepared(OverlayLayout prepared) {
         labels.clear(); unplaced.clear(); removeUnplacedButton(); closeReader();
         if (screenshot == null || screenshot.isRecycled()) return;
-        int width = screenshot.getWidth(), height = screenshot.getHeight();
-        float preferredSize = Math.min(android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, 16,
-                getResources().getDisplayMetrics()), Math.min(width, height) * .045f);
-        List<TextRegion> valid = new ArrayList<>();
-        List<int[]> occupied = new ArrayList<>();
-        for (TextRegion region : regions) {
-            Rect r = new Rect(region.bounds);
-            if (region.translated.trim().isEmpty()) continue;
-            if (r.isEmpty() || !r.intersect(0,0,width,height)) { unplaced.add(region); continue; }
-            valid.add(new TextRegion(r, region.source, region.translated));
-            occupied.add(new int[]{r.left, r.top, r.right, r.bottom});
-        }
-        for (int i = 0; i < valid.size(); i++) {
-            TextRegion region = valid.get(i);
-            int[] anchor = occupied.get(i);
-            int top = background(region.bounds, region.bounds.top), bottom = background(region.bounds, region.bounds.bottom - 1);
-            // White bubbles stay white. Dark game panels retain their vertical background gradient.
-            if (luminance(top) > 215 && luminance(bottom) > 215) top = bottom = Color.WHITE;
-            int foreground = (luminance(top) + luminance(bottom)) / 2 < 145 ? Color.WHITE : 0xff202723;
-            float readable=Math.max(10,preferredSize*.75f);
-            ParagraphLayout.Placement placement=ParagraphLayout.fit(region.translated,region.bounds,preferredSize,readable,foreground);
-            // Use the original box when it is already readable. Claim only enough nearby
-            // blank background to avoid shrinking the font by more than about 10%.
-            for(float growth:new float[]{.25f,.5f,.75f,1f}) {
-                if(placement.fontSize>=preferredSize*.9f) break;
-                int[] expanded=BubbleGeometry.expand(anchor,width,height,screenshot::getPixel,occupied.toArray(new int[0][]),growth,top,bottom);
-                Rect area=new Rect(expanded[0],expanded[1],expanded[2],expanded[3]);
-                ParagraphLayout.Placement candidate=ParagraphLayout.fit(region.translated,area,preferredSize,readable,foreground);
-                if(candidate.fontSize>placement.fontSize+.05f) placement=candidate;
-            }
-            Rect reserved=placement.bounds;
-            occupied.add(new int[]{reserved.left,reserved.top,reserved.right,reserved.bottom});
-            labels.add(new Label(placement, top, bottom));
-        }
+        labels.addAll(prepared.labels); unplaced.addAll(prepared.unplaced);
         if(!unplaced.isEmpty()) {
-            unplacedButton=Ui.button(getContext(),"未定位译文 · "+unplaced.size()+" 处",false);
+            unplacedButton=Ui.button(getContext(),"待展开译文 · "+unplaced.size()+" 处",false);
             unplacedButton.setOnClickListener(v -> showUnplaced());
             FrameLayout.LayoutParams params=new FrameLayout.LayoutParams(-2,-2,Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);
             params.bottomMargin=Ui.dp(getContext(),48); addView(unplacedButton,params);
@@ -124,19 +103,6 @@ public final class TranslationOverlay extends FrameLayout {
         for (Label label : labels) result.add(label.layout);
         return result;
     }
-    private int background(Rect rect, int row) {
-        List<Integer> colors = new ArrayList<>();
-        for (int dy = -2; dy <= 2; dy++) {
-            int y = Math.max(0, Math.min(screenshot.getHeight() - 1, row + dy));
-            for (int distance = 2; distance <= 6; distance += 2) {
-                colors.add(screenshot.getPixel(Math.max(0, rect.left - distance), y));
-                colors.add(screenshot.getPixel(Math.min(screenshot.getWidth() - 1, rect.right + distance - 1), y));
-            }
-        }
-        colors.sort(java.util.Comparator.comparingInt(TranslationOverlay::luminance));
-        return colors.get(colors.size() / 2) | 0xff000000;
-    }
-    private static int luminance(int c) { return (((c>>16)&255)*3 + ((c>>8)&255)*6 + (c&255))/10; }
     @Override protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
         paint.setShader(null); paint.setStyle(Paint.Style.FILL); paint.setAlpha(255);
@@ -148,9 +114,8 @@ public final class TranslationOverlay extends FrameLayout {
             canvas.drawBitmap(screenshot, null, bitmapBounds, paint);
             if (!peeking) {
                 for (Label label : labels) {
-                    Rect b = label.layout.bounds;
                     paint.setShader(label.background);
-                    canvas.drawRect(b, paint);
+                    canvas.drawPath(label.mask, paint);
                 }
                 paint.setShader(null);
                 for (Label label : labels) {
@@ -200,7 +165,7 @@ public final class TranslationOverlay extends FrameLayout {
             if(!region.source.isEmpty()) content.append(region.source).append("\n");
             content.append(region.translated);
         }
-        showReader("未定位译文",content.toString());
+        showReader("待展开译文",content.toString());
     }
     private void removeUnplacedButton() {
         if(unplacedButton!=null) { removeView(unplacedButton); unplacedButton=null; }
@@ -251,12 +216,4 @@ public final class TranslationOverlay extends FrameLayout {
     }
     @Override public boolean performClick() { super.performClick(); toggle.run(); return true; }
     public void release() { frameTiming=null; frameFinished=null; removeCallbacks(hold); pressed = null; closeReader(); removeUnplacedButton(); unplaced.clear(); screenshot = null; labels.clear(); }
-    private static final class Label {
-        final ParagraphLayout.Placement layout;
-        final Shader background;
-        Label(ParagraphLayout.Placement layout, int topColor, int bottomColor) {
-            this.layout=layout;
-            background=new LinearGradient(0,layout.bounds.top,0,layout.bounds.bottom,topColor,bottomColor,Shader.TileMode.CLAMP);
-        }
-    }
 }
