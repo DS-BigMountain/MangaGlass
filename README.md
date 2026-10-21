@@ -2,7 +2,7 @@
 
 Android 截图翻译工具，使用支持图片输入的 AI 自动识别原文语言并翻译为简体中文，译文覆盖到原文位置。适用于漫画和游戏画面，最低支持 Android 8.0。
 
-GitHub 发布版本：**V1.1.1**。应用版本为 **1.1.1**（versionCode **10**）。
+当前正式版本：**V1.1.1**（Android versionCode **10**）。
 
 [下载 V1.1.1 安装包](https://github.com/DS-BigMountain/MangaGlass/releases/tag/V1.1.1)
 
