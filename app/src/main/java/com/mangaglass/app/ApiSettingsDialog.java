@@ -29,7 +29,7 @@ final class ApiSettingsDialog {
     private AlertDialog dialog;
     private EditText url, key;
     private AutoCompleteTextView model;
-    private Spinner thinking;
+    private Spinner provider, thinking;
     private CheckBox lossless;
     private TextView result, policyHint;
     private Button fetch, choose, test, save, clear;
@@ -63,7 +63,15 @@ final class ApiSettingsDialog {
         Ui.gap(content,12);
         content.addView(Ui.text(activity, "发送完整截图，AI 自动识别语言并翻译为简体中文。", 12, Ui.MUTED, false));
         Ui.gap(content,12);
-        url = input(content, "API 基础地址（HTTPS）", initial.url, false);
+        content.addView(Ui.text(activity, "API 服务商", 12, Ui.MUTED, false));
+        provider = new Spinner(activity); provider.setContentDescription("API 服务商");
+        ArrayAdapter<String> providers = new ArrayAdapter<>(activity, android.R.layout.simple_spinner_item, ApiProvider.LABELS);
+        providers.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item); provider.setAdapter(providers);
+        provider.setSelection(ApiProvider.index(initial.provider)); content.addView(provider); editable.add(provider);
+        Ui.gap(content,8);
+        url = input(content, "API 基础地址（可选，HTTPS）", initial.baseUrl, false);
+        updateAddressHint();
+        content.addView(Ui.text(activity, "留空使用所选服务商的默认地址；填写的地址优先使用。自定义服务需填写地址。", 12, Ui.MUTED, false));
         key = input(content, "API Key", initial.key, true);
         CheckBox reveal = new CheckBox(activity); reveal.setText("显示 Key"); reveal.setTextSize(13); reveal.setTextColor(Ui.MUTED);
         reveal.setOnCheckedChangeListener((b, checked) -> { key.setTransformationMethod(checked ? null : android.text.method.PasswordTransformationMethod.getInstance()); key.setSelection(key.length()); });
@@ -106,12 +114,24 @@ final class ApiSettingsDialog {
         TextWatcher endpointChange = new TextWatcher() {
             public void beforeTextChanged(CharSequence s,int start,int count,int after) { }
             public void onTextChanged(CharSequence s,int start,int before,int count) {
-                models = settings.models(url.getText().toString(),key.getText().toString()); updateChoices(); updatePolicyHint();
-                showResult("配置已修改，请重新获取模型或测试翻译后保存。");
+                endpointChanged();
             }
             public void afterTextChanged(Editable e) { }
         };
         url.addTextChangedListener(endpointChange); key.addTextChangedListener(endpointChange);
+        provider.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            private int previous = provider.getSelectedItemPosition();
+            @Override public void onItemSelected(AdapterView<?> p, View v, int position, long id) {
+                updateAddressHint();
+                if (position != previous) {
+                    String oldProvider = ApiProvider.IDS[previous]; previous = position;
+                    // Older profiles stored the official address explicitly; let these follow the selection.
+                    if (!"custom".equals(oldProvider) && oldProvider.equals(ApiProvider.infer(url.getText().toString()))) url.setText("");
+                    endpointChanged();
+                }
+            }
+            @Override public void onNothingSelected(AdapterView<?> p) { }
+        });
         model.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s,int start,int count,int after) { }
             public void onTextChanged(CharSequence s,int start,int before,int count) { updatePolicyHint(); }
@@ -126,7 +146,7 @@ final class ApiSettingsDialog {
         save.setOnClickListener(v -> {
                 try {
                     Settings.Profile profile = snapshot();
-                    settings.saveProfile(profile.url, profile.model, profile.key, profile.thinking, profile.lossless, models);
+                    settings.saveProfile(profile.provider, profile.baseUrl, profile.model, profile.key, profile.thinking, profile.lossless, models);
                     onSaved.run(); dialog.dismiss();
                 } catch (Exception e) { showResult(e instanceof IllegalArgumentException ? e.getMessage() : "配置保存失败，请重试"); }
         });
@@ -151,11 +171,23 @@ final class ApiSettingsDialog {
         parent.addView(field,new LinearLayout.LayoutParams(-1,Ui.dp(activity,54))); editable.add(field); return field;
     }
     private void showResult(String text) { result.setVisibility(View.VISIBLE); result.setText(text); }
+    private String providerId() { return ApiProvider.IDS[provider.getSelectedItemPosition()]; }
+    private String effectiveUrl() { return ApiProvider.resolve(providerId(), url.getText().toString()); }
+    private void updateAddressHint() {
+        String address = ApiProvider.defaultUrl(providerId());
+        url.setHint(address.isEmpty() ? "请填写自定义 HTTPS 地址" : address);
+    }
+    private void endpointChanged() {
+        try { models = settings.models(effectiveUrl(), key.getText().toString()); }
+        catch (IllegalArgumentException e) { models = Collections.emptyList(); }
+        updateChoices(); updatePolicyHint();
+        showResult("配置已修改，请重新获取模型或测试翻译后保存。");
+    }
     private Settings.Profile snapshot() {
         String address = url.getText().toString().trim(), secret = key.getText().toString().trim();
-        TranslationProtocol.endpoint(address);
+        ApiProvider.resolve(providerId(), address);
         if (secret.isEmpty()) throw new IllegalArgumentException("请填写 API 密钥");
-        return new Settings.Profile(address,model.getText().toString(),secret,RequestPolicy.VALUES[thinking.getSelectedItemPosition()],lossless.isChecked(),models);
+        return new Settings.Profile(providerId(),address,model.getText().toString(),secret,RequestPolicy.VALUES[thinking.getSelectedItemPosition()],lossless.isChecked(),models);
     }
     private void updateChoices() {
         List<String> ids = new ArrayList<>(); for (ModelCatalog.Model item : models) ids.add(item.id);
@@ -163,7 +195,9 @@ final class ApiSettingsDialog {
         choose.setEnabled(!busy && !models.isEmpty());
     }
     private void updatePolicyHint() {
-        if (policyHint != null) policyHint.setText(RequestPolicy.description(url.getText().toString(),model.getText().toString(),RequestPolicy.VALUES[thinking.getSelectedItemPosition()]));
+        if (policyHint == null) return;
+        try { policyHint.setText(RequestPolicy.description(effectiveUrl(),model.getText().toString(),RequestPolicy.VALUES[thinking.getSelectedItemPosition()])); }
+        catch (IllegalArgumentException e) { policyHint.setText(e.getMessage()); }
     }
     private void setBusy(boolean value) {
         busy = value;

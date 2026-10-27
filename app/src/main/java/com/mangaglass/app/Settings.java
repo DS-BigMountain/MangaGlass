@@ -24,8 +24,9 @@ public final class Settings {
     public Profile profile() throws Exception {
         String p = PREFIX;
         String url = preferences.getString(p + "url", ""), key = key(p);
-        return new Profile(url, preferences.getString(p + "model", ""), key, preferences.getString(p + "thinking", "auto"),
-                preferences.getBoolean(p + "lossless", false), models(url, key));
+        String provider = preferences.getString(p + "provider", ApiProvider.infer(url));
+        return new Profile(provider, url, preferences.getString(p + "model", ""), key, preferences.getString(p + "thinking", "auto"),
+                preferences.getBoolean(p + "lossless", false), models(ApiProvider.resolve(provider, url), key));
     }
     public void saveProfile(String url, String model, String newKey) throws Exception {
         saveProfile(url, model, newKey, "auto", false);
@@ -34,11 +35,14 @@ public final class Settings {
         saveProfile(url,model,newKey,thinking,lossless,null);
     }
     public void saveProfile(String url, String model, String newKey, String thinking, boolean lossless, java.util.List<ModelCatalog.Model> models) throws Exception {
-        TranslationProtocol.endpoint(url);
+        saveProfile(ApiProvider.infer(url), url, model, newKey, thinking, lossless, models);
+    }
+    public void saveProfile(String provider, String baseUrl, String model, String newKey, String thinking, boolean lossless, java.util.List<ModelCatalog.Model> models) throws Exception {
+        String url = ApiProvider.resolve(provider, baseUrl);
         if (model.trim().isEmpty()) throw new IllegalArgumentException("请填写服务商的模型名称");
         if (newKey.trim().isEmpty()) throw new IllegalArgumentException("请填写 API 密钥");
         String p = PREFIX;
-        SharedPreferences.Editor edit = preferences.edit().putString(p + "url", url.trim()).putString(p + "model", model.trim())
+        SharedPreferences.Editor edit = preferences.edit().putString(p + "provider", provider).putString(p + "url", baseUrl.trim()).putString(p + "model", model.trim())
                 .putString(p + "thinking", RequestPolicy.VALUES[RequestPolicy.index(thinking)]).putBoolean(p + "lossless", lossless);
         if (!scope(url, newKey).equals(preferences.getString(p + "models_scope", ""))) edit.remove(p + "models").remove(p + "models_scope");
         if (models != null) edit.putString(p + "models_scope",scope(url,newKey)).putString(p + "models",ModelCatalog.serialize(models));
@@ -88,12 +92,16 @@ public final class Settings {
         return generator.generateKey();
     }
     public static final class Profile {
-        public final String url, model, key, thinking;
+        public final String provider, baseUrl, url, model, key, thinking;
         public final boolean lossless;
         public final ModelCatalog.Model modelInfo;
         public Profile(String url, String model, String key) { this(url, model, key, "auto", false, java.util.Collections.emptyList()); }
         public Profile(String url, String model, String key, String thinking, boolean lossless, java.util.List<ModelCatalog.Model> models) {
-            this.url = url.trim(); this.model = model.trim(); this.key = key.trim(); this.thinking = thinking; this.lossless = lossless;
+            this(ApiProvider.infer(url), url, model, key, thinking, lossless, models);
+        }
+        public Profile(String provider, String baseUrl, String model, String key, String thinking, boolean lossless, java.util.List<ModelCatalog.Model> models) {
+            this.provider = provider; this.baseUrl = baseUrl.trim(); this.url = ApiProvider.resolve(provider, baseUrl);
+            this.model = model.trim(); this.key = key.trim(); this.thinking = thinking; this.lossless = lossless;
             this.modelInfo = ModelCatalog.find(models, this.model);
         }
         public boolean ready() { return !key.isEmpty() && !model.trim().isEmpty(); }
