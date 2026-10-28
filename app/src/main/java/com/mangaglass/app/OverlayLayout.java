@@ -50,25 +50,23 @@ final class OverlayLayout {
             BubbleInterior interior=similar(top,bottom) ? BubbleInterior.detect(anchor,width,height,pixels,occupied.toArray(new int[0][]),top) : null;
             if(interior!=null) bottom=top;
             int foreground=(luminance(top)+luminance(bottom))/2<145 ? 0xfffafafa : 0xff202124;
-            float readable=Math.max(10,preferred*.75f);
+            float sourceSize=SourceTextSize.estimate(region,pixels,top,bottom,preferred);
             ParagraphLayout.Placement best=null;
             if(interior!=null) {
                 for(int[] area:interior.textAreas()) {
                     if(collides(area,occupied,anchor)) continue;
-                    ParagraphLayout.Placement candidate=ParagraphLayout.fit(region.translated,rect(area),preferred,readable,foreground,true);
+                    ParagraphLayout.Placement candidate=ParagraphLayout.fit(region.translated,rect(area),sourceSize,foreground,true);
                     if(better(candidate,best)) best=candidate;
                 }
             }
             if(best==null) {
-                if(interior!=null) { result.unplaced.add(region); continue; }
                 interior=null;
-                best=ParagraphLayout.fit(region.translated,region.bounds,preferred,readable,foreground);
+                best=ParagraphLayout.fit(region.translated,region.bounds,sourceSize,foreground);
                 // Blank expansion only affects text layout. It never enlarges the source-erasure mask.
                 int[] expanded=BubbleGeometry.expand(anchor,width,height,pixels,occupied.toArray(new int[0][]),1f,top,bottom);
-                ParagraphLayout.Placement candidate=ParagraphLayout.fit(region.translated,rect(expanded),preferred,readable,foreground);
+                ParagraphLayout.Placement candidate=ParagraphLayout.fit(region.translated,rect(expanded),sourceSize,foreground);
                 if(better(candidate,best)) best=candidate;
             }
-            if(best.text.getText().length()==0) { result.unplaced.add(region); continue; }
             Path mask=new Path();
             if(interior!=null) {
                 // Erase the complete verified interior, including glyphs just outside the AI text box.
@@ -94,9 +92,6 @@ final class OverlayLayout {
 
     private static boolean better(ParagraphLayout.Placement candidate,ParagraphLayout.Placement best) {
         if(best==null) return true;
-        if(candidate.needsReader!=best.needsReader) return !candidate.needsReader;
-        if(candidate.needsReader && candidate.text.getText().length()!=best.text.getText().length())
-            return candidate.text.getText().length()>best.text.getText().length();
         if(Math.abs(candidate.fontSize-best.fontSize)>.25f) return candidate.fontSize>best.fontSize;
         // At equivalent legibility prefer a compact paragraph, with fewer unnecessary line breaks.
         if(candidate.text.getLineCount()!=best.text.getLineCount()) return candidate.text.getLineCount()<best.text.getLineCount();
