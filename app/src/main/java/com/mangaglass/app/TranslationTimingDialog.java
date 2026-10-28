@@ -19,7 +19,7 @@ final class TranslationTimingDialog {
         TranslationTimingStore store=TranslationTimingStore.get(activity);
         LinearLayout page=Ui.column(activity); int pad=Ui.dp(activity,20); page.setPadding(pad,pad,pad,pad);
         ScrollView scroll=new ScrollView(activity); scroll.addView(page);
-        page.addView(Ui.text(activity,"保存最近 30 次；点击记录展开各环节。仅保留发生时间和耗时，不保存图片、原文或译文。",13,Ui.MUTED,false));
+        page.addView(Ui.text(activity,"保存最近 30 次；点击记录查看各环节。仅保留发生时间和耗时，不保存图片、原文或译文。",13,Ui.MUTED,false));
         Ui.gap(page,12);
         page.addView(Ui.text(activity,"总耗时：点击翻译至译文首帧绘制完成，未完成记录计到中止。AI 往返分为连接、发送、等待和接收；等待包含服务端处理与网络传输，无法直接测出纯推理耗时。本机合计包含处理和等待。",12,Ui.MUTED,false));
         Ui.gap(page,16);

@@ -29,7 +29,7 @@ public final class TranslationOverlay extends FrameLayout {
     private boolean moved, longPressed;
     private Label pressed;
     private View reader;
-    private Button unplacedButton;
+    private View unplacedPanel;
     private TranslationTiming frameTiming;
     private Runnable frameFinished;
     private final Runnable toggle;
@@ -48,7 +48,7 @@ public final class TranslationOverlay extends FrameLayout {
     public void screenshot(Bitmap bitmap) {
         frameTiming=null; frameFinished=null;
         screenshot = bitmap; bitmapBounds.set(0,0,bitmap.getWidth(),bitmap.getHeight());
-        labels.clear(); unplaced.clear(); removeUnplacedButton(); closeReader(); invalidate();
+        labels.clear(); unplaced.clear(); removeUnplacedPanel(); closeReader(); invalidate();
     }
     public void screenCoordinates(boolean value) {
         screenCoordinates = value; screenLocation[0] = 0; screenLocation[1] = 0; invalidate();
@@ -72,7 +72,7 @@ public final class TranslationOverlay extends FrameLayout {
     }
     public void peeking(boolean value) {
         closeReader(); peeking = value;
-        if(unplacedButton!=null) unplacedButton.setVisibility(value ? View.GONE : View.VISIBLE);
+        if(unplacedPanel!=null) unplacedPanel.setVisibility(value ? View.GONE : View.VISIBLE);
         setContentDescription(value ? "原图预览，点画面恢复译文" : "译文覆盖，点画面预览原图"); invalidate();
     }
     public void regions(List<TextRegion> regions) {
@@ -87,14 +87,31 @@ public final class TranslationOverlay extends FrameLayout {
                 getResources().getDisplayMetrics()),Math.min(width,height)*.045f);
     }
     void prepared(OverlayLayout prepared) {
-        labels.clear(); unplaced.clear(); removeUnplacedButton(); closeReader();
+        labels.clear(); unplaced.clear(); removeUnplacedPanel(); closeReader();
         if (screenshot == null || screenshot.isRecycled()) return;
         labels.addAll(prepared.labels); unplaced.addAll(prepared.unplaced);
         if(!unplaced.isEmpty()) {
-            unplacedButton=Ui.button(getContext(),"待展开译文 · "+unplaced.size()+" 处",false);
-            unplacedButton.setOnClickListener(v -> showUnplaced());
-            FrameLayout.LayoutParams params=new FrameLayout.LayoutParams(-2,-2,Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);
-            params.bottomMargin=Ui.dp(getContext(),48); addView(unplacedButton,params);
+            StringBuilder content=new StringBuilder();
+            for(TextRegion region:unplaced) {
+                if(content.length()>0) content.append("\n\n");
+                content.append(region.translated);
+            }
+            String fullText=content.toString();
+            unplacedPanel=new View(getContext()) {
+                private ParagraphLayout.Placement paragraph;
+                @Override protected void onSizeChanged(int w,int h,int oldw,int oldh) {
+                    if(w>0 && h>0) paragraph=ParagraphLayout.fit(fullText,new Rect(0,0,w,h),Ui.dp(getContext(),16),Ui.INK,false);
+                }
+                @Override protected void onDraw(Canvas canvas) {
+                    canvas.drawColor(Color.WHITE);
+                    if(paragraph!=null) paragraph.draw(canvas);
+                }
+            };
+            unplacedPanel.setContentDescription(fullText);
+            FrameLayout.LayoutParams params=new FrameLayout.LayoutParams(-1,
+                    Math.max(1,Math.min(Ui.dp(getContext(),160),screenshot.getHeight()/3)),Gravity.BOTTOM);
+            params.leftMargin=params.rightMargin=Ui.dp(getContext(),12);
+            params.bottomMargin=Ui.dp(getContext(),12); addView(unplacedPanel,params);
         }
         message = ""; busy = false; peeking(false);
     }
@@ -120,8 +137,7 @@ public final class TranslationOverlay extends FrameLayout {
                 paint.setShader(null);
                 for (Label label : labels) {
                     ParagraphLayout.Placement p = label.layout;
-                    canvas.save(); canvas.clipRect(p.bounds); canvas.translate(p.textLeft, p.textTop);
-                    p.text.draw(canvas); canvas.restore();
+                    p.draw(canvas);
                 }
             }
             canvas.restore();
@@ -156,19 +172,8 @@ public final class TranslationOverlay extends FrameLayout {
     private void showReader(Label label) {
         showReader("完整译文",label.layout.fullText);
     }
-    private void showUnplaced() {
-        StringBuilder content=new StringBuilder();
-        for(int i=0;i<unplaced.size();i++) {
-            TextRegion region=unplaced.get(i);
-            if(i>0) content.append("\n\n");
-            content.append(i+1).append(". ");
-            if(!region.source.isEmpty()) content.append(region.source).append("\n");
-            content.append(region.translated);
-        }
-        showReader("待展开译文",content.toString());
-    }
-    private void removeUnplacedButton() {
-        if(unplacedButton!=null) { removeView(unplacedButton); unplacedButton=null; }
+    private void removeUnplacedPanel() {
+        if(unplacedPanel!=null) { removeView(unplacedPanel); unplacedPanel=null; }
     }
     private void showReader(String title,String fullText) {
         closeReader();
@@ -181,7 +186,7 @@ public final class TranslationOverlay extends FrameLayout {
         panel.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         Button close = Ui.button(getContext(), "返回译文", false); close.setOnClickListener(v -> closeReader()); panel.addView(close);
         reader = panel;
-        if(unplacedButton!=null) unplacedButton.setVisibility(View.GONE);
+        if(unplacedPanel!=null) unplacedPanel.setVisibility(View.GONE);
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
                 Math.max(1, Math.min(getWidth() - padding * 2, Ui.dp(getContext(), 600))),
                 Math.max(1, Math.min(getHeight() - padding * 2, Ui.dp(getContext(), 560))), Gravity.CENTER);
@@ -189,7 +194,7 @@ public final class TranslationOverlay extends FrameLayout {
     }
     private void closeReader() {
         if (reader != null) { removeView(reader); reader = null; invalidate(); }
-        if(unplacedButton!=null) unplacedButton.setVisibility(peeking ? View.GONE : View.VISIBLE);
+        if(unplacedPanel!=null) unplacedPanel.setVisibility(peeking ? View.GONE : View.VISIBLE);
     }
     @Override public boolean onTouchEvent(MotionEvent event) {
         switch (event.getActionMasked()) {
@@ -206,7 +211,6 @@ public final class TranslationOverlay extends FrameLayout {
                 removeCallbacks(hold);
                 if (!moved && !longPressed) {
                     if (reader != null) closeReader();
-                    else if (pressed != null && pressed.layout.needsReader) showReader(pressed);
                     else performClick();
                 }
                 pressed = null; return true;
@@ -215,5 +219,5 @@ public final class TranslationOverlay extends FrameLayout {
         }
     }
     @Override public boolean performClick() { super.performClick(); toggle.run(); return true; }
-    public void release() { frameTiming=null; frameFinished=null; removeCallbacks(hold); pressed = null; closeReader(); removeUnplacedButton(); unplaced.clear(); screenshot = null; labels.clear(); }
+    public void release() { frameTiming=null; frameFinished=null; removeCallbacks(hold); pressed = null; closeReader(); removeUnplacedPanel(); unplaced.clear(); screenshot = null; labels.clear(); }
 }
