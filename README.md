@@ -1,5 +1,7 @@
 # 漫译 · MangaGlass
 
+**简体中文** | [English](README.en.md)
+
 漫译是一款 Android 截图翻译工具，适用于漫画、游戏等画面。应用通过视觉模型识别原文并翻译为简体中文，将译文覆盖到对应位置。
 
 [下载安装包](https://github.com/DS-BigMountain/MangaGlass/releases/latest)
