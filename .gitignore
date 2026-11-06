@@ -12,6 +12,9 @@
 !/app/
 !/scripts/
 
+# Documentation, verification evidence and design references stay in the local workspace.
+/docs/
+
 /scripts/*
 !/scripts/build.ps1
 

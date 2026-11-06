@@ -38,14 +38,24 @@ public final class TranslationEngine {
         for (VisionProtocol.Region region : parsed) {
             int[] b = region.box;
             if(b==null) { regions.add(new TextRegion(new Rect(),region.source,region.text)); continue; }
-            // Round outward so the mask includes small glyphs at the right and bottom edges.
-            Rect rect = new Rect(b[0] * bitmap.getWidth() / 1000, b[1] * bitmap.getHeight() / 1000,
-                    (b[2] * bitmap.getWidth() + 999) / 1000, (b[3] * bitmap.getHeight() + 999) / 1000);
-            if (rect.width() < 2 || rect.height() < 2) rect.setEmpty();
-            regions.add(new TextRegion(rect, region.source, region.text));
+            Rect rect = pixelBox(b,bitmap.getWidth(),bitmap.getHeight());
+            // The container box starts the translation flow; a missing or degenerate
+            // container leaves the bubble field empty so layout can infer it from pixels.
+            Rect bubble = pixelBox(region.bubble,bitmap.getWidth(),bitmap.getHeight());
+            regions.add(new TextRegion(rect==null ? new Rect() : rect, bubble==null ? new Rect() : bubble,
+                    region.source, region.text));
         }
         check();
         return regions;
+    }
+    /** Converts normalized_1000 coordinates to screenshot pixels, rounding outward. */
+    private static Rect pixelBox(int[] b,int width,int height) {
+        if(b==null) return null;
+        // Round outward so the mask includes small glyphs at the right and bottom edges.
+        Rect rect = new Rect(b[0] * width / 1000, b[1] * height / 1000,
+                (b[2] * width + 999) / 1000, (b[3] * height + 999) / 1000);
+        if (rect.width() < 2 || rect.height() < 2) return null;
+        return rect;
     }
     public String post(String requestBody, Settings.Profile profile) throws Exception {
         if (!profile.ready()) throw new IllegalArgumentException("请先配置 AI 截图翻译的 API 密钥与模型");

@@ -34,6 +34,23 @@ public final class ParagraphLayout {
             canvas.scale(scale,scale); text.draw(canvas); canvas.restore();
         }
     }
+    /** A paragraph anchored at a balloon top edge: horizontal fit selects the font size, height follows the text. */
+    public static final class Flow {
+        public final StaticLayout text;
+        public final float fontSize;
+        public final int padding;
+        public final String fullText;
+        Flow(StaticLayout text,float fontSize,int padding,String fullText) {
+            this.text=text; this.fontSize=fontSize; this.padding=padding; this.fullText=fullText;
+        }
+        public int height() { return text.getHeight(); }
+        public int lineCount() { return text.getLineCount(); }
+        void draw(Canvas canvas,Rect bounds) {
+            canvas.save(); canvas.clipRect(bounds);
+            canvas.translate(bounds.left+padding,bounds.top+padding); text.draw(canvas);
+            canvas.restore();
+        }
+    }
     private ParagraphLayout() {}
     public static String normalize(String value) {
         return value.replace("\r\n","\n").replace('\r','\n').replace('\u2028','\n').replace('\u2029','\n')
@@ -71,6 +88,38 @@ public final class ParagraphLayout {
             }
         }
         return new Placement(bounds, padding, best, fullText, centered);
+    }
+    /** Flow layout has no height limit; the vertical extent follows the wrapped text. */
+    public static Flow flow(String value, int width, float preferredSize, int color, boolean centered) {
+        int outer = Math.max(1, width);
+        String fullText = normalize(value);
+        float preferred = Math.max(1, preferredSize);
+        int padding = Math.max(0, Math.min(Math.round(preferred * .24f), Math.round(outer * .08f)));
+        padding = Math.min(padding, (outer - 1) / 2);
+        int available = Math.max(1, outer - 2 * padding);
+        Layout.Alignment alignment = centered ? Layout.Alignment.ALIGN_CENTER : Layout.Alignment.ALIGN_NORMAL;
+        StaticLayout best = create(fullText, available, preferred, color, alignment);
+        if (!horizontalFits(best, available)) {
+            // Only horizontal space constrains this layout. Shrink until the longest line
+            // fits the balloon width; the paragraph keeps growing downward at that size.
+            float low = 1, high = preferred;
+            StaticLayout smallest = create(fullText, available, low, color, alignment);
+            best = smallest;
+            if (horizontalFits(smallest, available)) {
+                for (int i = 0; i < 14; i++) {
+                    float size = (low + high) / 2;
+                    StaticLayout candidate = create(fullText, available, size, color, alignment);
+                    if (horizontalFits(candidate, available)) { low = size; best = candidate; }
+                    else high = size;
+                }
+            }
+        }
+        return new Flow(best, best.getPaint().getTextSize(), padding, fullText);
+    }
+    static boolean horizontalFits(StaticLayout layout, int width) {
+        for (int line = 0; line < layout.getLineCount(); line++)
+            if (layout.getLineMax(line) > width + .01f) return false;
+        return true;
     }
     static boolean fits(StaticLayout layout, int width, int height) {
         if (layout.getHeight() > height) return false;

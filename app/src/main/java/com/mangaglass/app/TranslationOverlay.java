@@ -115,10 +115,8 @@ public final class TranslationOverlay extends FrameLayout {
         }
         message = ""; busy = false; peeking(false);
     }
-    List<ParagraphLayout.Placement> layoutSnapshot() {
-        List<ParagraphLayout.Placement> result = new ArrayList<>();
-        for (Label label : labels) result.add(label.layout);
-        return result;
+    List<OverlayLayout.Label> layoutSnapshot() {
+        return new ArrayList<>(labels);
     }
     @Override protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
@@ -134,10 +132,15 @@ public final class TranslationOverlay extends FrameLayout {
                     paint.setShader(label.background);
                     canvas.drawPath(label.mask, paint);
                 }
+                // The backdrop travels with its paragraph, so text that grows past the
+                // balloon or shifts aside keeps the source balloon colour underneath.
+                for (Label label : labels) {
+                    paint.setShader(label.background);
+                    canvas.drawRect(label.backdrop, paint);
+                }
                 paint.setShader(null);
                 for (Label label : labels) {
-                    ParagraphLayout.Placement p = label.layout;
-                    p.draw(canvas);
+                    label.flow.draw(canvas, label.bounds);
                 }
             }
             canvas.restore();
@@ -166,11 +169,11 @@ public final class TranslationOverlay extends FrameLayout {
     }
     private Label labelAt(float x, float y) {
         if (screenCoordinates) getLocationOnScreen(screenLocation);
-        for (Label label : labels) if (label.layout.bounds.contains((int)(x + screenLocation[0]), (int)(y + screenLocation[1]))) return label;
+        for (Label label : labels) if (label.bounds.contains((int)(x + screenLocation[0]), (int)(y + screenLocation[1]))) return label;
         return null;
     }
     private void showReader(Label label) {
-        showReader("完整译文",label.layout.fullText);
+        showReader("完整译文",label.fullText());
     }
     private void removeUnplacedPanel() {
         if(unplacedPanel!=null) { removeView(unplacedPanel); unplacedPanel=null; }
