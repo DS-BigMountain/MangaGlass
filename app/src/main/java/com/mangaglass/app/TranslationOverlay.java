@@ -12,8 +12,10 @@ import java.util.ArrayList;
 import java.util.List;
 import com.mangaglass.app.OverlayLayout.Label;
 
-/** A touch-consuming frozen page. PEEKING changes painting, never window touch flags. */
+/** 冻结画面的触摸代理。原图预览只改变绘制，窗口触摸标志保持固定。 */
 public final class TranslationOverlay extends FrameLayout {
+    /** 聚焦阅读时译文块之外画面的压暗比例，约 55%。 */
+    private static final int FOCUS_DIM = 0x8c000000;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final TextPaint text = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final List<Label> labels = new ArrayList<>();
@@ -28,6 +30,11 @@ public final class TranslationOverlay extends FrameLayout {
     private float downX, downY;
     private boolean moved, longPressed;
     private Label pressed;
+    /** 当前聚焦阅读的译文块；为空表示整页译文模式。 */
+    private Label focused;
+    /** 双击判定：记录上一次点中的译文块与时刻。 */
+    private Label lastTapLabel;
+    private long lastTapAt;
     private View reader;
     private View unplacedPanel;
     private TranslationTiming frameTiming;
@@ -35,7 +42,7 @@ public final class TranslationOverlay extends FrameLayout {
     private final Runnable toggle;
     private final Runnable hold = () -> {
         if (!moved && pressed != null && !busy && !peeking) {
-            longPressed = true; showReader(pressed);
+            longPressed = true; lastTapLabel = null; showReader(pressed);
             performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
         }
     };
@@ -48,7 +55,8 @@ public final class TranslationOverlay extends FrameLayout {
     public void screenshot(Bitmap bitmap) {
         frameTiming=null; frameFinished=null;
         screenshot = bitmap; bitmapBounds.set(0,0,bitmap.getWidth(),bitmap.getHeight());
-        labels.clear(); unplaced.clear(); removeUnplacedPanel(); closeReader(); invalidate();
+        labels.clear(); unplaced.clear(); removeUnplacedPanel(); closeReader();
+        focused=null; lastTapLabel=null; invalidate();
     }
     public void screenCoordinates(boolean value) {
         screenCoordinates = value; screenLocation[0] = 0; screenLocation[1] = 0; invalidate();
@@ -66,12 +74,12 @@ public final class TranslationOverlay extends FrameLayout {
             timing.enter(TranslationTiming.Stage.DRAW);
         }
         super.draw(canvas);
-        // Include the bitmap, labels and child views. This is CPU drawing completion,
-        // not a claim about the later compositor/physical display presentation time.
+        // 位图、译文与子视图的 CPU 绘制在此完成；后续合成器与物理屏幕呈现时刻另行测量。
         if(timing!=null && finished!=null) finished.run();
     }
     public void peeking(boolean value) {
         closeReader(); peeking = value;
+        if (value) focused = null;
         if(unplacedPanel!=null) unplacedPanel.setVisibility(value ? View.GONE : View.VISIBLE);
         setContentDescription(value ? "原图预览，点画面恢复译文" : "译文覆盖，点画面预览原图"); invalidate();
     }
@@ -88,6 +96,7 @@ public final class TranslationOverlay extends FrameLayout {
     }
     void prepared(OverlayLayout prepared) {
         labels.clear(); unplaced.clear(); removeUnplacedPanel(); closeReader();
+        focused = null; lastTapLabel = null;
         if (screenshot == null || screenshot.isRecycled()) return;
         labels.addAll(prepared.labels); unplaced.addAll(prepared.unplaced);
         if(!unplaced.isEmpty()) {
@@ -124,27 +133,30 @@ public final class TranslationOverlay extends FrameLayout {
         if (screenCoordinates) getLocationOnScreen(screenLocation);
         if (screenshot != null && !screenshot.isRecycled()) {
             canvas.save(); canvas.translate(-screenLocation[0], -screenLocation[1]);
-            // An explicit pixel rectangle bypasses bitmap/canvas density scaling, so
-            // the image, AI boxes and hit targets all share the same coordinates.
+            // 显式像素矩形绕过位图与画布的密度缩放，画面、AI 框与命中区域共用同一坐标系。
             canvas.drawBitmap(screenshot, null, bitmapBounds, paint);
             if (!peeking) {
+                // 背景着色器来自 24×24 分块中值位图，开启过滤让块间以双线性插值过渡。
+                paint.setFilterBitmap(true);
                 for (Label label : labels) {
                     paint.setShader(label.background);
                     canvas.drawPath(label.mask, paint);
                 }
-                // The backdrop travels with its paragraph, so text that grows past the
-                // balloon or shifts aside keeps the source balloon colour underneath.
+                // 背景框随段落移动：译文越长或越往旁边让位，原文气泡底色仍然垫在文字下方。
                 for (Label label : labels) {
                     paint.setShader(label.background);
                     canvas.drawRect(label.backdrop, paint);
                 }
                 paint.setShader(null);
+                paint.setFilterBitmap(false);
                 for (Label label : labels) {
                     label.flow.draw(canvas, label.bounds);
                 }
             }
             canvas.restore();
         }
+        if (focused != null && !peeking && !busy && screenshot != null && !screenshot.isRecycled())
+            drawFocusDim(canvas);
         if (peeking) {
             paint.setColor(0xff85d5b0); paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(Ui.dp(getContext(),1.5f));
             paint.setShadowLayer(Ui.dp(getContext(),5),0,0,0xff85d5b0);
@@ -171,6 +183,47 @@ public final class TranslationOverlay extends FrameLayout {
         if (screenCoordinates) getLocationOnScreen(screenLocation);
         for (Label label : labels) if (label.bounds.contains((int)(x + screenLocation[0]), (int)(y + screenLocation[1]))) return label;
         return null;
+    }
+    /** 聚焦阅读：压暗当前译文块之外的画面，点按后恢复整页译文。 */
+    private void focus(Label label) {
+        if (label == null) return;
+        focused = label;
+        lastTapLabel = null;
+        setContentDescription("聚焦译文，点按恢复整页译文");
+        invalidate();
+    }
+    private void exitFocusMode() {
+        if (focused == null) return;
+        focused = null;
+        setContentDescription(peeking ? "原图预览，点画面恢复译文" : "译文覆盖，点画面预览原图");
+        invalidate();
+    }
+    /** 触摸点与译文块的命中判定；屏幕坐标与截图坐标在此对齐。 */
+    private boolean contains(Label label, float x, float y) {
+        if (label == null) return false;
+        if (screenCoordinates) getLocationOnScreen(screenLocation);
+        int offsetX = screenCoordinates ? screenLocation[0] : 0;
+        int offsetY = screenCoordinates ? screenLocation[1] : 0;
+        return label.bounds.contains((int)(x + offsetX), (int)(y + offsetY));
+    }
+    /** 聚焦遮罩绘制：四块矩形围出当前译文块，块内画面保持原亮度。 */
+    private void drawFocusDim(Canvas canvas) {
+        int offsetX = screenCoordinates ? screenLocation[0] : 0;
+        int offsetY = screenCoordinates ? screenLocation[1] : 0;
+        int left = Math.max(0, Math.min(getWidth(), focused.bounds.left - offsetX));
+        int top = Math.max(0, Math.min(getHeight(), focused.bounds.top - offsetY));
+        int right = Math.max(0, Math.min(getWidth(), focused.bounds.right - offsetX));
+        int bottom = Math.max(0, Math.min(getHeight(), focused.bounds.bottom - offsetY));
+        if (right < left) { int swap = left; left = right; right = swap; }
+        if (bottom < top) { int swap = top; top = bottom; bottom = swap; }
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setAlpha(255);
+        paint.setColor(FOCUS_DIM);
+        canvas.drawRect(0, 0, getWidth(), top, paint);
+        canvas.drawRect(0, bottom, getWidth(), getHeight(), paint);
+        canvas.drawRect(0, top, left, bottom, paint);
+        canvas.drawRect(right, top, getWidth(), bottom, paint);
     }
     private void showReader(Label label) {
         showReader("完整译文",label.fullText());
@@ -214,7 +267,31 @@ public final class TranslationOverlay extends FrameLayout {
                 removeCallbacks(hold);
                 if (!moved && !longPressed) {
                     if (reader != null) closeReader();
-                    else performClick();
+                    else if (focused != null) { exitFocusMode(); lastTapLabel = null; }
+                    else if (pressed != null) {
+                        long now = android.os.SystemClock.uptimeMillis();
+                        if (lastTapLabel == pressed && now - lastTapAt <= ViewConfiguration.getDoubleTapTimeout()) {
+                            // 同一译文块上的第二击进入聚焦：先恢复译文，再压暗块外区域。
+                            performClick();
+                            focus(pressed);
+                        } else {
+                            lastTapLabel = pressed;
+                            lastTapAt = now;
+                            performClick();
+                        }
+                    } else {
+                        Label previous = lastTapLabel;
+                        long now = android.os.SystemClock.uptimeMillis();
+                        if (previous != null && now - lastTapAt <= ViewConfiguration.getDoubleTapTimeout()
+                                && contains(previous, event.getX(), event.getY())) {
+                            // 首击已切到原图预览，此处第二击恢复译文并聚焦该块。
+                            performClick();
+                            focus(previous);
+                        } else {
+                            lastTapLabel = null;
+                            performClick();
+                        }
+                    }
                 }
                 pressed = null; return true;
             case MotionEvent.ACTION_CANCEL: removeCallbacks(hold); pressed = null; return true;
@@ -222,5 +299,5 @@ public final class TranslationOverlay extends FrameLayout {
         }
     }
     @Override public boolean performClick() { super.performClick(); toggle.run(); return true; }
-    public void release() { frameTiming=null; frameFinished=null; removeCallbacks(hold); pressed = null; closeReader(); removeUnplacedPanel(); unplaced.clear(); screenshot = null; labels.clear(); }
+    public void release() { frameTiming=null; frameFinished=null; removeCallbacks(hold); pressed = null; focused = null; lastTapLabel = null; closeReader(); removeUnplacedPanel(); unplaced.clear(); screenshot = null; labels.clear(); }
 }

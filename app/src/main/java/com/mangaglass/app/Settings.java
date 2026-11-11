@@ -21,6 +21,28 @@ public final class Settings {
         // Replace the legacy single free-text timing summary with numeric timing records.
         if(preferences.contains("last_timing")) preferences.edit().remove("last_timing").apply();
     }
+    // Both routes share the encrypted API profile; only the request shape differs.
+    static final String MODE_VISION = "vision", MODE_OCR = "ocr";
+    static final String[] OCR_LANGUAGES = {OcrEngine.AUTO, OcrEngine.JAPANESE, OcrEngine.ENGLISH, OcrEngine.KOREAN};
+    static final String[] OCR_LANGUAGE_TITLES = {"自动识别", "日语", "英语", "韩语"};
+    public String mode() {
+        return MODE_OCR.equals(preferences.getString("translation_mode", MODE_VISION)) ? MODE_OCR : MODE_VISION;
+    }
+    public void saveMode(String mode) {
+        preferences.edit().putString("translation_mode", MODE_OCR.equals(mode) ? MODE_OCR : MODE_VISION).apply();
+    }
+    public String ocrLanguage() {
+        String value = preferences.getString("ocr_language", OcrEngine.AUTO);
+        for (String language : OCR_LANGUAGES) if (language.equals(value)) return language;
+        return OcrEngine.AUTO;
+    }
+    public void saveOcrLanguage(String language) {
+        for (String candidate : OCR_LANGUAGES) if (candidate.equals(language)) {
+            preferences.edit().putString("ocr_language", candidate).apply();
+            return;
+        }
+        preferences.edit().putString("ocr_language", OcrEngine.AUTO).apply();
+    }
     public Profile profile() throws Exception {
         String p = PREFIX;
         String url = preferences.getString(p + "url", ""), key = key(p);

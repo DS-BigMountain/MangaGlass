@@ -58,11 +58,24 @@ public class PageFlowTest {
         assertTrue(a.right<=b.left);
         assertTrue(b.right<=c.left);
     }
-    @Test public void wholePageRaisesWhenTheLowestBlockCrossesTheBottom() {
-        Box a=new Box(0,100,0,500,0,60), b=new Box(200,300,0,300,0,60);
-        PageFlow.shiftUp(Arrays.asList(a,b),300);
-        assertEquals(296,a.bottom); assertEquals(96,b.bottom);
-        assertEquals(-204,a.top); assertEquals(-204,b.top);
+    @Test public void smallOverflowRaisesThePageSlightly() {
+        Box a=new Box(0,100,200,1100,200,60);
+        PageFlow.shiftUp(Arrays.asList(a),1000);
+        // 底部溢出 106 像素，上移量按画面高度的 1.2% 封顶为 12 像素。
+        assertEquals(188,a.top); assertEquals(1088,a.bottom);
+    }
+    @Test public void largeOverflowKeepsAnchorsNearTheirBubbles() {
+        Box a=new Box(0,100,300,3000,300,60), b=new Box(200,300,100,200,100,60);
+        PageFlow.shiftUp(Arrays.asList(a,b),1000);
+        int shift=PageFlow.pageShift(3000,100,1000);
+        assertEquals(300-shift,a.top);
+        assertEquals(100-shift,b.top);
+        assertTrue(shift<=Math.max(4,Math.round(1000*.012f)));
+        assertTrue(a.top>=0 && b.top>=0);
+    }
+    @Test public void pageShiftNeverLiftsAboveThePageTop() {
+        assertEquals(3,PageFlow.pageShift(1000,3,1000));
+        assertEquals(0,PageFlow.pageShift(500,0,1000));
     }
     @Test public void blocksInsideThePageStayStill() {
         Box a=new Box(0,100,0,200,0,60), b=new Box(200,300,0,120,0,60);

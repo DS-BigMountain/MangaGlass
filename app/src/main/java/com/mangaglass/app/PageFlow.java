@@ -71,12 +71,27 @@ final class PageFlow {
         }
     }
 
-    /** Raised canvas: when the lowest block crosses the bottom edge, every block moves up by that distance. */
+    /**
+     * 整页上移量：只抵消有限的底部溢出，并且让每条译文都停在画面顶部之下。
+     * 单条超长译文通过气泡内的字号收缩处理，避免把整页译文推离各自的气泡。
+     */
+    static int pageShift(int maxBottom, int minTop, int pageHeight) {
+        int limit = pageHeight - Math.max(4, Math.round(pageHeight * .006f));
+        int overflow = maxBottom - limit;
+        if (overflow <= 0) return 0;
+        int allowed = Math.min(overflow, Math.max(4, Math.round(pageHeight * .012f)));
+        allowed = Math.min(allowed, Math.max(0, minTop));
+        return Math.max(0, allowed);
+    }
+
+    /** Raised canvas: the whole page moves up by the bounded shift computed by {@link #pageShift}. */
     static void shiftUp(List<? extends Block> blocks,int pageHeight) {
-        int limit=pageHeight-Math.max(4,Math.round(pageHeight*.006f));
-        int maxBottom=0;
-        for(Block block:blocks) maxBottom=Math.max(maxBottom,block.bottom());
-        int shift=maxBottom-limit;
+        int maxBottom=0,minTop=Integer.MAX_VALUE;
+        for(Block block:blocks) {
+            maxBottom=Math.max(maxBottom,block.bottom());
+            minTop=Math.min(minTop,block.top());
+        }
+        int shift=pageShift(maxBottom,minTop,pageHeight);
         if(shift<=0) return;
         for(Block block:blocks) block.lift(-shift);
     }

@@ -41,6 +41,7 @@ public final class CaptureService extends Service {
     private Bitmap screenshot;
     private Future<?> job;
     private TranslationEngine engine;
+    private TextTranslationEngine textEngine;
     private int width,height,rotation;
     private long captureToken = -1;
     private long captureRequestToken = -1;
@@ -273,17 +274,33 @@ public final class CaptureService extends Service {
     }
     private void startTranslation(long token) throws Exception {
         Settings settings=new Settings(this); Settings.Profile profile=settings.profile();
+        boolean localOcr=Settings.MODE_OCR.equals(settings.mode());
+        String language=settings.ocrLanguage();
         Bitmap owned=screenshot.copy(Bitmap.Config.ARGB_8888,false);
         TranslationTiming timing=activeTiming;
         float preferredSize=overlay.preferredSize();
-        TranslationEngine taskEngine=new TranslationEngine().recordUsage(TokenUsageStore.get(this)).recordTiming(timing); engine=taskEngine;
+        TranslationEngine taskEngine=localOcr ? null : new TranslationEngine().recordUsage(TokenUsageStore.get(this)).recordTiming(timing);
+        TextTranslationEngine textTask=localOcr ? new TextTranslationEngine().recordUsage(TokenUsageStore.get(this)).recordTiming(timing) : null;
+        engine=taskEngine; textEngine=textTask;
         jobTimeout=() -> { if(gate.current(token)) fail("本次处理超时，请检查网络或换一个模型后重试"); };
-        main.postDelayed(jobTimeout,105000);
+        // The first local run copies the bundled weights, so the limit covers that preparation too.
+        main.postDelayed(jobTimeout,localOcr ? 150000 : 105000);
         timing.enter(TranslationTiming.Stage.WORKER_WAIT);
         job=worker.submit(() -> {
             try {
-                timing.enter(TranslationTiming.Stage.IMAGE_PREPARE);
-                List<TextRegion> result=taskEngine.translate(owned,profile,message -> main.post(() -> { if(gate.current(token) && overlay!=null) overlay.progress(message); }));
+                TranslationEngine.Progress report=message -> main.post(() -> { if(gate.current(token) && overlay!=null) overlay.progress(message); });
+                List<TextRegion> result;
+                if (localOcr) {
+                    timing.enter(TranslationTiming.Stage.OCR);
+                    List<OcrRegion> recognized=OcrEngine.recognize(this,owned,language,
+                            message -> main.post(() -> { if(gate.current(token) && overlay!=null) overlay.progress(message); }));
+                    if (recognized.isEmpty()) throw new IllegalArgumentException("本地识别未得到文字，可切换 AI 识图翻译后重试");
+                    result=textTask.translate(recognized,profile,
+                            message -> main.post(() -> { if(gate.current(token) && overlay!=null) overlay.progress(message); }));
+                } else {
+                    timing.enter(TranslationTiming.Stage.IMAGE_PREPARE);
+                    result=taskEngine.translate(owned,profile,report);
+                }
                 timing.enter(TranslationTiming.Stage.LAYOUT);
                 OverlayLayout prepared=OverlayLayout.prepare(owned,result,preferredSize);
                 timing.enter(TranslationTiming.Stage.UI_WAIT);
@@ -328,6 +345,7 @@ public final class CaptureService extends Service {
         if(captureTimeout!=null) main.removeCallbacks(captureTimeout);
         if(jobTimeout!=null) main.removeCallbacks(jobTimeout);
         if(engine!=null) { engine.cancel(); engine=null; }
+        if(textEngine!=null) { textEngine.cancel(); textEngine=null; }
         if(job!=null) { job.cancel(true); job=null; }
         if(overlay!=null) { overlay.release(); if(overlay.isAttachedToWindow()) windows.removeViewImmediate(overlay); overlay=null; }
         if(screenshot!=null) { screenshot.recycle(); screenshot=null; }
@@ -383,7 +401,9 @@ public final class CaptureService extends Service {
         if(display!=null) display.release();
         if(reader!=null) reader.close();
         if(projection!=null) { projection.unregisterCallback(projectionCallback); projection.stop(); }
-        worker.shutdownNow(); stopForeground(STOP_FOREGROUND_REMOVE); super.onDestroy();
+        // Native sessions release on the worker thread, so a running inference finishes first.
+        try { worker.execute(OcrEngine::release); } catch (java.util.concurrent.RejectedExecutionException ignored) { }
+        worker.shutdown(); stopForeground(STOP_FOREGROUND_REMOVE); super.onDestroy();
     }
     private void toast(String value) { Toast.makeText(this,value,Toast.LENGTH_LONG).show(); }
     @Override public IBinder onBind(Intent intent) { return null; }

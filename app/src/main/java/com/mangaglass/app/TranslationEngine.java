@@ -24,16 +24,28 @@ public final class TranslationEngine {
         if (!profile.ready()) throw new IllegalArgumentException("请先配置 AI 截图翻译的 API 密钥与模型");
         if (profile.modelInfo != null && profile.modelInfo.knownTextOnly()) throw new IllegalArgumentException("此模型的列表信息标明仅支持文字，请选择支持图片输入的模型");
         stage = "准备图片"; progress.update(stage);
-        ByteArrayOutputStream image = new ByteArrayOutputStream();
-        // Keep full-image dimensions; normalized coordinates refer to these exact pixels.
-        if (!bitmap.compress(profile.lossless ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG, 85, image)) {
-            throw new IllegalArgumentException("截图编码失败，请重新截图");
+        // A bounded long edge keeps one request inside the upload budget. Normalized coordinates
+        // still map onto the original capture through its own size, so the mask stays pixel exact.
+        int uploadWidth = bitmap.getWidth(), uploadHeight = bitmap.getHeight();
+        Bitmap upload = bitmap;
+        int longEdge = Math.max(uploadWidth, uploadHeight);
+        if (longEdge > 1920) {
+            float scale = 1920f / longEdge;
+            uploadWidth = Math.max(1, Math.round(uploadWidth * scale));
+            uploadHeight = Math.max(1, Math.round(uploadHeight * scale));
+            upload = Bitmap.createScaledBitmap(bitmap, uploadWidth, uploadHeight, true);
         }
+        ByteArrayOutputStream image = new ByteArrayOutputStream();
+        try {
+            if (!upload.compress(profile.lossless ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG, 85, image)) {
+                throw new IllegalArgumentException("截图编码失败，请重新截图");
+            }
+        } finally { if (upload != bitmap) upload.recycle(); }
         if (image.size() > 20 * 1024 * 1024) throw new IllegalArgumentException("截图过大，请降低屏幕分辨率后重试");
-        String request = VisionProtocol.request(profile.model, Base64.encodeToString(image.toByteArray(), Base64.NO_WRAP), profile.lossless ? "image/png" : "image/jpeg",bitmap.getWidth(),bitmap.getHeight());
+        String request = VisionProtocol.request(profile.model, Base64.encodeToString(image.toByteArray(), Base64.NO_WRAP), profile.lossless ? "image/png" : "image/jpeg", uploadWidth, uploadHeight);
         check();
         stage = "等待 AI 截图翻译"; progress.update(stage + " · " + image.size() / 1024 + " KB");
-        List<VisionProtocol.Region> parsed = VisionProtocol.response(post(request, profile),bitmap.getWidth(),bitmap.getHeight());
+        List<VisionProtocol.Region> parsed = VisionProtocol.response(post(request, profile), uploadWidth, uploadHeight);
         List<TextRegion> regions = new ArrayList<>();
         for (VisionProtocol.Region region : parsed) {
             int[] b = region.box;

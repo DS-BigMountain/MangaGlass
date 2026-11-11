@@ -1,4 +1,4 @@
-# Only application sources, resources, build files and the user guide belong in Git.
+# Only application sources, resources, build files, screenshots and the user guide belong in Git.
 /*
 !/.gitignore
 !/.gitattributes
@@ -11,6 +11,7 @@
 !/gradle/
 !/app/
 !/scripts/
+!/screenshots/
 
 # Documentation, verification evidence and design references stay in the local workspace.
 /docs/

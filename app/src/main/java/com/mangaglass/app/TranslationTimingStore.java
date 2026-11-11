@@ -16,7 +16,7 @@ final class TranslationTimingStore extends SQLiteOpenHelper {
         if(instance==null) instance=new TranslationTimingStore(context.getApplicationContext(),"translation_timing.db");
         return instance;
     }
-    TranslationTimingStore(Context context,String name) { super(context,name,null,2); }
+    TranslationTimingStore(Context context,String name) { super(context,name,null,3); }
     @Override public void onCreate(SQLiteDatabase db) {
         StringBuilder sql=new StringBuilder("CREATE TABLE timings (started_ms INTEGER NOT NULL,total_ms INTEGER NOT NULL,first_frame_ms INTEGER NOT NULL");
         for(TranslationTiming.Stage stage:TranslationTiming.Stage.values()) sql.append(',').append(stage.column).append(" INTEGER NOT NULL");
@@ -26,6 +26,10 @@ final class TranslationTimingStore extends SQLiteOpenHelper {
     @Override public void onUpgrade(SQLiteDatabase db,int oldVersion,int newVersion) {
         if(oldVersion<2) for(TranslationTiming.NetworkPhase phase:TranslationTiming.NetworkPhase.values()) {
             db.execSQL("ALTER TABLE timings ADD COLUMN "+phase.column+" INTEGER NOT NULL DEFAULT -1");
+        }
+        if(oldVersion<3) {
+            // Existing rows predate local recognition; they carry an empty duration for that stage.
+            db.execSQL("ALTER TABLE timings ADD COLUMN "+TranslationTiming.Stage.OCR.column+" INTEGER NOT NULL DEFAULT -1");
         }
     }
     synchronized void record(TranslationTiming.Record record) {

@@ -10,6 +10,7 @@ final class TranslationTiming {
         CAPTURE_PROCESS("capture_process_ms", "截屏像素处理"),
         WORKER_WAIT("worker_wait_ms", "本机任务等待"),
         IMAGE_PREPARE("image_prepare_ms", "图片编码与请求准备"),
+        OCR("ocr_ms", "本地文字识别"),
         AI_REQUEST("ai_request_ms", "AI 请求往返"),
         RESPONSE_PROCESS("response_process_ms", "响应解析与坐标处理"),
         UI_WAIT("ui_wait_ms", "界面调度等待"),
