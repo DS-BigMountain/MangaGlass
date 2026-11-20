@@ -1,22 +1,23 @@
 package com.mangaglass.app;
 
 import android.content.Context;
+import ai.onnxruntime.NodeInfo;
 import ai.onnxruntime.OnnxModelMetadata;
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtException;
 import ai.onnxruntime.OrtSession;
-import ai.onnxruntime.NodeInfo;
 import ai.onnxruntime.TensorInfo;
 import java.io.File;
 import java.nio.FloatBuffer;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Lazy ONNX Runtime sessions for the bundled detector, orientation classifier, three language
- * recognizers and the manga engine. Sessions stay open across captures; a release closes them when
- * the floating service stops.
+ * Lazy, persistent ONNX Runtime sessions for the bundled detector, orientation classifier,
+ * language recognizers and the manga engine. Keeping loaded language recognizers resident avoids
+ * repeated 200-500ms disk reload thrashing during AUTO-mode probing.
  */
 final class OcrRuntime {
     static final class Graph {
@@ -24,27 +25,38 @@ final class OcrRuntime {
         final String inputName;
         final long[] inputShape;
         final String[] alphabet;
+
         Graph(OrtSession session, String inputName, long[] inputShape, String[] alphabet) {
-            this.session = session; this.inputName = inputName; this.inputShape = inputShape; this.alphabet = alphabet;
+            this.session = session;
+            this.inputName = inputName;
+            this.inputShape = inputShape;
+            this.alphabet = alphabet;
         }
+
         int height(int fallback) { return inputShape.length > 2 && inputShape[2] > 0 ? (int) inputShape[2] : fallback; }
         int width() { return inputShape.length > 3 && inputShape[3] > 0 ? (int) inputShape[3] : 0; }
+        boolean supportsBatch() { return inputShape.length >= 4 && inputShape[0] <= 0; }
     }
 
     private final OrtEnvironment environment;
     private final OrtSession.SessionOptions options;
     private final File directory;
     private Graph detector, classifier, mangaDetector, mangaRecognizer;
-    private Graph recognizer;
-    private String recognizerLanguage;
+    private final Map<String, Graph> recognizers = new HashMap<>();
     private String mangaDictionary;
 
     OcrRuntime(Context context, OcrModels.Progress progress) throws Exception {
         environment = OrtEnvironment.getEnvironment();
         options = new OrtSession.SessionOptions();
-        options.setIntraOpNumThreads(4);
+        int cores = Math.max(2, Runtime.getRuntime().availableProcessors());
+        int threads = Math.min(4, Math.max(2, cores / 2));
+        options.setIntraOpNumThreads(threads);
         options.setInterOpNumThreads(1);
         options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT);
+        try {
+            // Avoid busy-spinning on mobile big.LITTLE SoCs so UI and network I/O stay responsive.
+            options.addConfigEntry("session.intra_op.allow_spinning", "0");
+        } catch (OrtException ignored) { }
         directory = OcrModels.prepare(context, progress);
     }
 
@@ -62,14 +74,13 @@ final class OcrRuntime {
     }
 
     synchronized Graph recognizer(String language) throws Exception {
-        if (recognizer != null && language.equals(recognizerLanguage)) return recognizer;
-        close(recognizer);
-        recognizer = null;
-        recognizerLanguage = null;
-        String file = "ja".equals(language) ? "rec-ja.onnx" : "en".equals(language) ? "rec-en.onnx" : "rec-ko.onnx";
-        recognizer = load(file, true);
-        recognizerLanguage = language;
-        return recognizer;
+        String key = "en".equals(language) ? "en" : "ko".equals(language) ? "ko" : "ja";
+        Graph cached = recognizers.get(key);
+        if (cached != null) return cached;
+        String file = "ja".equals(key) ? "rec-ja.onnx" : "en".equals(key) ? "rec-en.onnx" : "rec-ko.onnx";
+        Graph loaded = load(file, true);
+        recognizers.put(key, loaded);
+        return loaded;
     }
 
     synchronized boolean mangaAvailable() {
@@ -89,7 +100,17 @@ final class OcrRuntime {
         return mangaRecognizer;
     }
 
-    /** Run one graph and return its output tensor values with the declared output shape. */
+    /** Preload the detector and primary recognizer so the first capture incurs no cold-start delay. */
+    void warmUp(String language) {
+        try {
+            detector();
+            String primary = OcrEngine.ENGLISH.equals(language) ? OcrEngine.ENGLISH
+                    : OcrEngine.KOREAN.equals(language) ? OcrEngine.KOREAN : OcrEngine.JAPANESE;
+            recognizer(primary);
+        } catch (Exception ignored) { }
+    }
+
+    /** Run one graph (batch size 1 or N) and return flattened output tensor values with declared shape. */
     float[] run(OrtSession session, String inputName, float[] data, long[] shape, long[][] outputShape)
             throws OrtException {
         try (OnnxTensor input = OnnxTensor.createTensor(environment, FloatBuffer.wrap(data), shape);
@@ -131,14 +152,17 @@ final class OcrRuntime {
         return character == null ? null : CtcDecoder.alphabet(character);
     }
 
-    void release() {
-        close(recognizer);
+    synchronized void release() {
+        for (Graph graph : recognizers.values()) close(graph);
+        recognizers.clear();
         close(detector);
         close(classifier);
         close(mangaDetector);
         close(mangaRecognizer);
-        recognizer = null; detector = null; classifier = null; mangaDetector = null; mangaRecognizer = null;
-        recognizerLanguage = null;
+        detector = null;
+        classifier = null;
+        mangaDetector = null;
+        mangaRecognizer = null;
     }
 
     private static void close(Graph graph) {

@@ -31,6 +31,12 @@ public final class Settings {
     public void saveMode(String mode) {
         preferences.edit().putString("translation_mode", MODE_OCR.equals(mode) ? MODE_OCR : MODE_VISION).apply();
     }
+    public boolean continuousMode() {
+        return preferences.getBoolean("continuous_mode", false);
+    }
+    public void saveContinuousMode(boolean continuous) {
+        preferences.edit().putBoolean("continuous_mode", continuous).apply();
+    }
     public String ocrLanguage() {
         String value = preferences.getString("ocr_language", OcrEngine.AUTO);
         for (String language : OCR_LANGUAGES) if (language.equals(value)) return language;

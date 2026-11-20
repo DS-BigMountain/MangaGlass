@@ -12,7 +12,7 @@ public final class TranslationEngine {
     public interface Progress { void update(String message); }
     private final ApiTransport transport;
     private volatile boolean cancelled;
-    private volatile String stage = "准备处理";
+    private volatile String stage = "识别中";
     public TranslationEngine() { this(null); }
     TranslationEngine(okhttp3.OkHttpClient client) { transport = new ApiTransport(client); }
     public TranslationEngine recordUsage(TokenUsage.Recorder recorder) { transport.usageRecorder=recorder; return this; }
@@ -23,14 +23,14 @@ public final class TranslationEngine {
         check();
         if (!profile.ready()) throw new IllegalArgumentException("请先配置 AI 截图翻译的 API 密钥与模型");
         if (profile.modelInfo != null && profile.modelInfo.knownTextOnly()) throw new IllegalArgumentException("此模型的列表信息标明仅支持文字，请选择支持图片输入的模型");
-        stage = "准备图片"; progress.update(stage);
+        stage = "识别中"; progress.update(stage);
         // A bounded long edge keeps one request inside the upload budget. Normalized coordinates
         // still map onto the original capture through its own size, so the mask stays pixel exact.
         int uploadWidth = bitmap.getWidth(), uploadHeight = bitmap.getHeight();
         Bitmap upload = bitmap;
         int longEdge = Math.max(uploadWidth, uploadHeight);
-        if (longEdge > 1920) {
-            float scale = 1920f / longEdge;
+        if (longEdge > 1600) {
+            float scale = 1600f / longEdge;
             uploadWidth = Math.max(1, Math.round(uploadWidth * scale));
             uploadHeight = Math.max(1, Math.round(uploadHeight * scale));
             upload = Bitmap.createScaledBitmap(bitmap, uploadWidth, uploadHeight, true);
@@ -44,18 +44,24 @@ public final class TranslationEngine {
         if (image.size() > 20 * 1024 * 1024) throw new IllegalArgumentException("截图过大，请降低屏幕分辨率后重试");
         String request = VisionProtocol.request(profile.model, Base64.encodeToString(image.toByteArray(), Base64.NO_WRAP), profile.lossless ? "image/png" : "image/jpeg", uploadWidth, uploadHeight);
         check();
-        stage = "等待 AI 截图翻译"; progress.update(stage + " · " + image.size() / 1024 + " KB");
+        stage = "翻译中"; progress.update(stage);
         List<VisionProtocol.Region> parsed = VisionProtocol.response(post(request, profile), uploadWidth, uploadHeight);
         List<TextRegion> regions = new ArrayList<>();
         for (VisionProtocol.Region region : parsed) {
             int[] b = region.box;
-            if(b==null) { regions.add(new TextRegion(new Rect(),region.source,region.text)); continue; }
+            boolean untranslated = TextTranslationEngine.isUntranslated(region.source, region.text);
+            if(b==null) {
+                regions.add(new TextRegion(new Rect(),new Rect(),region.source,region.text,region.vertical,
+                        java.util.Collections.emptyList(),0f,false,untranslated,false));
+                continue;
+            }
             Rect rect = pixelBox(b,bitmap.getWidth(),bitmap.getHeight());
             // The container box starts the translation flow; a missing or degenerate
             // container leaves the bubble field empty so layout can infer it from pixels.
             Rect bubble = pixelBox(region.bubble,bitmap.getWidth(),bitmap.getHeight());
             regions.add(new TextRegion(rect==null ? new Rect() : rect, bubble==null ? new Rect() : bubble,
-                    region.source, region.text));
+                    region.source, region.text, region.vertical,
+                    java.util.Collections.emptyList(), 0f, false, untranslated, false));
         }
         check();
         return regions;

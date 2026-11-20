@@ -31,7 +31,7 @@ final class OcrModels {
             long expected = assetLength(assets, ASSET_ROOT + name);
             if (target.isFile() && expected >= 0 && target.length() == expected) continue;
             if (target.isFile() && expected < 0 && target.length() > 0) continue;
-            if (progress != null) progress.update("准备本地识别模型 · " + name);
+            if (progress != null) progress.update("识别中");
             copy(assets, ASSET_ROOT + name, target);
         }
         return directory;

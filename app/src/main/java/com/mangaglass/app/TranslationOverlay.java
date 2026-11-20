@@ -23,10 +23,9 @@ public final class TranslationOverlay extends FrameLayout {
     private final int[] screenLocation = new int[2];
     private final Rect bitmapBounds = new Rect();
     private Bitmap screenshot;
-    private boolean peeking, screenCoordinates = true;
-    private String message = "正在截取画面…";
+    private boolean peeking, continuous, screenCoordinates = true;
+    private String message = "";
     private boolean busy = true;
-    private long stageStarted = android.os.SystemClock.elapsedRealtime();
     private float downX, downY;
     private boolean moved, longPressed;
     private Label pressed;
@@ -61,13 +60,29 @@ public final class TranslationOverlay extends FrameLayout {
     public void screenCoordinates(boolean value) {
         screenCoordinates = value; screenLocation[0] = 0; screenLocation[1] = 0; invalidate();
     }
-    public void progress(String value) { message = value; busy = true; stageStarted = android.os.SystemClock.elapsedRealtime(); setContentDescription("翻译处理中，点击悬浮球取消"); invalidate(); }
-    public void completed(String value) { message = value; busy = false; invalidate(); }
+    public void continuousMode(boolean value) {
+        continuous = value;
+        setClickable(!value);
+        if (value) { closeReader(); focused = null; peeking = false; removeUnplacedPanel(); }
+        invalidate();
+    }
+    public void progress(String value) {
+        String next = value == null ? "" : value;
+        if (busy && next.equals(message)) return;
+        message = next; busy = true;
+        setContentDescription("翻译处理中，点击悬浮球取消"); invalidate();
+    }
+    public void completed(String value) {
+        String next = value == null ? "" : value;
+        if (!busy && next.equals(message)) return;
+        message = next; busy = false; invalidate();
+    }
     void onFirstTranslationFrame(TranslationTiming timing,Runnable finished) {
         frameTiming=timing; frameFinished=finished; invalidate();
     }
     @Override public void draw(Canvas canvas) {
-        TranslationTiming timing=!busy && !peeking && screenshot!=null && !screenshot.isRecycled() ? frameTiming : null;
+        boolean ready = !busy && !peeking && (continuous || (screenshot!=null && !screenshot.isRecycled()));
+        TranslationTiming timing=ready ? frameTiming : null;
         Runnable finished=frameFinished;
         if(timing!=null) {
             frameTiming=null; frameFinished=null;
@@ -91,15 +106,18 @@ public final class TranslationOverlay extends FrameLayout {
     float preferredSize() {
         int width=screenshot==null ? getResources().getDisplayMetrics().widthPixels : screenshot.getWidth();
         int height=screenshot==null ? getResources().getDisplayMetrics().heightPixels : screenshot.getHeight();
+        return preferredSize(width, height);
+    }
+    float preferredSize(int width, int height) {
         return Math.min(android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP,16,
                 getResources().getDisplayMetrics()),Math.min(width,height)*.045f);
     }
     void prepared(OverlayLayout prepared) {
         labels.clear(); unplaced.clear(); removeUnplacedPanel(); closeReader();
         focused = null; lastTapLabel = null;
-        if (screenshot == null || screenshot.isRecycled()) return;
+        if (!continuous && (screenshot == null || screenshot.isRecycled())) return;
         labels.addAll(prepared.labels); unplaced.addAll(prepared.unplaced);
-        if(!unplaced.isEmpty()) {
+        if(!continuous && !unplaced.isEmpty()) {
             StringBuilder content=new StringBuilder();
             for(TextRegion region:unplaced) {
                 if(content.length()>0) content.append("\n\n");
@@ -131,57 +149,73 @@ public final class TranslationOverlay extends FrameLayout {
         super.onDraw(canvas);
         paint.setShader(null); paint.setStyle(Paint.Style.FILL); paint.setAlpha(255);
         if (screenCoordinates) getLocationOnScreen(screenLocation);
-        if (screenshot != null && !screenshot.isRecycled()) {
+        boolean hasBitmap = screenshot != null && !screenshot.isRecycled();
+        boolean drawLabels = !peeking && (continuous || hasBitmap) && !labels.isEmpty();
+        if ((!continuous && hasBitmap) || drawLabels) {
             canvas.save(); canvas.translate(-screenLocation[0], -screenLocation[1]);
-            // 显式像素矩形绕过位图与画布的密度缩放，画面、AI 框与命中区域共用同一坐标系。
-            canvas.drawBitmap(screenshot, null, bitmapBounds, paint);
-            if (!peeking) {
-                // 背景着色器来自 24×24 分块中值位图，开启过滤让块间以双线性插值过渡。
-                paint.setFilterBitmap(true);
-                for (Label label : labels) {
-                    paint.setShader(label.background);
-                    canvas.drawPath(label.mask, paint);
-                }
-                // 背景框随段落移动：译文越长或越往旁边让位，原文气泡底色仍然垫在文字下方。
-                for (Label label : labels) {
-                    paint.setShader(label.background);
-                    canvas.drawRect(label.backdrop, paint);
-                }
+            if (!continuous && hasBitmap) {
+                // 显式像素矩形绕过位图与画布的密度缩放，画面、AI 框与命中区域共用同一坐标系。
+                canvas.drawBitmap(screenshot, null, bitmapBounds, paint);
+            }
+            if (drawLabels) {
+                // Pass 1: pixel-level stroke-only surface repair preserves original gradients, artwork and UI borders.
                 paint.setShader(null);
                 paint.setFilterBitmap(false);
                 for (Label label : labels) {
-                    label.flow.draw(canvas, label.bounds);
+                    if (label.coverBitmap != null && !label.coverBitmap.isRecycled() && label.coverRect != null) {
+                        canvas.drawBitmap(label.coverBitmap, null, label.coverRect, paint);
+                    }
+                }
+                // Pass 2: draw all translated text above rebuilt surfaces so no patch covers an earlier passage.
+                for (Label label : labels) {
+                    label.drawText(canvas);
                 }
             }
             canvas.restore();
         }
-        if (focused != null && !peeking && !busy && screenshot != null && !screenshot.isRecycled())
+        if (focused != null && !peeking && !busy && !continuous && hasBitmap)
             drawFocusDim(canvas);
         if (peeking) {
-            paint.setColor(0xff85d5b0); paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(Ui.dp(getContext(),1.5f));
-            paint.setShadowLayer(Ui.dp(getContext(),5),0,0,0xff85d5b0);
+            paint.setColor(0xff34c759); paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(Ui.dp(getContext(),1.5f));
+            paint.setShadowLayer(Ui.dp(getContext(),5),0,0,0xff34c759);
             canvas.drawRoundRect(2,2,getWidth()-2,getHeight()-2,Ui.dp(getContext(),18),Ui.dp(getContext(),18),paint);
             paint.clearShadowLayer(); paint.setStyle(Paint.Style.FILL);
-            chip(canvas,"原图预览 · 点画面恢复译文",getHeight()-Ui.dp(getContext(),80));
+            chip(canvas,"原图预览 · 点画面恢复译文",getHeight()-Ui.dp(getContext(),80),false);
         } else if (!message.isEmpty()) {
-            String label = busy ? message + " · " + ((android.os.SystemClock.elapsedRealtime()-stageStarted)/1000) + " 秒 · 点球取消" : message;
-            chip(canvas,label,Ui.dp(getContext(),70));
-            if (busy) postInvalidateDelayed(1000);
+            chip(canvas,message,Ui.dp(getContext(),continuous ? 28 : 56),true);
         }
         if (reader != null) { paint.setColor(0x99000000); canvas.drawRect(0,0,getWidth(),getHeight(),paint); }
     }
-    private void chip(Canvas canvas,String label,float y) {
-        text.setTextSize(Ui.dp(getContext(),12)); text.setColor(Color.WHITE); text.setTypeface(Typeface.DEFAULT);
-        float width = Math.min(getWidth()-Ui.dp(getContext(),24),text.measureText(label)+Ui.dp(getContext(),28));
-        float left = (getWidth()-width)/2;
-        paint.setColor(0xeb203e33); paint.setStyle(Paint.Style.FILL);
-        canvas.drawRoundRect(left,y,left+width,y+Ui.dp(getContext(),36),Ui.dp(getContext(),18),Ui.dp(getContext(),18),paint);
-        canvas.save(); canvas.clipRect(left+8,y,left+width-8,y+Ui.dp(getContext(),36));
-        canvas.drawText(label,(getWidth()-text.measureText(label))/2,y+Ui.dp(getContext(),23),text); canvas.restore();
+    private void chip(Canvas canvas,String label,float y,boolean withDot) {
+        Context c = getContext();
+        text.setTextSize(Ui.dp(c,13)); text.setColor(Color.WHITE); text.setTypeface(Ui.typeface(600));
+        float textW = text.measureText(label);
+        float dotDiameter = withDot ? Ui.dp(c,7) : 0;
+        float dotGap = withDot ? Ui.dp(c,8) : 0;
+        float horizontalPad = Ui.dp(c,16);
+        float contentW = dotDiameter + dotGap + textW;
+        float height = Ui.dp(c,34);
+        float width = Math.min(getWidth()-Ui.dp(c,24), contentW + horizontalPad * 2);
+        float left = (getWidth()-width)/2f;
+        paint.setColor(0xdc1c1c1e); paint.setStyle(Paint.Style.FILL);
+        canvas.drawRoundRect(left,y,left+width,y+height,height/2f,height/2f,paint);
+        canvas.save(); canvas.clipRect(left+Ui.dp(c,8),y,left+width-Ui.dp(c,8),y+height);
+        float startX = (getWidth()-contentW)/2f;
+        float centerY = y + height/2f;
+        if (withDot) {
+            paint.setColor(0xff30d158);
+            canvas.drawCircle(startX + dotDiameter/2f, centerY, dotDiameter/2f, paint);
+        }
+        Paint.FontMetrics fm = text.getFontMetrics();
+        float baseline = centerY - (fm.ascent + fm.descent)/2f;
+        canvas.drawText(label, startX + dotDiameter + dotGap, baseline, text);
+        canvas.restore();
     }
     private Label labelAt(float x, float y) {
         if (screenCoordinates) getLocationOnScreen(screenLocation);
-        for (Label label : labels) if (label.bounds.contains((int)(x + screenLocation[0]), (int)(y + screenLocation[1]))) return label;
+        for (Label label : labels) {
+            if (!label.coverOnly && label.bounds.contains((int)(x + screenLocation[0]), (int)(y + screenLocation[1]))) return label;
+        }
         return null;
     }
     /** 聚焦阅读：压暗当前译文块之外的画面，点按后恢复整页译文。 */
@@ -253,6 +287,7 @@ public final class TranslationOverlay extends FrameLayout {
         if(unplacedPanel!=null) unplacedPanel.setVisibility(peeking ? View.GONE : View.VISIBLE);
     }
     @Override public boolean onTouchEvent(MotionEvent event) {
+        if (continuous) return false;
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 downX = event.getX(); downY = event.getY(); moved = false; longPressed = false;

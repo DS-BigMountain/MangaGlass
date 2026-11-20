@@ -34,4 +34,24 @@ public class ParagraphLayoutTest {
     @Test public void defaultSpacingKeepsThePreviousLayoutValue() {
         assertEquals(1.08f,ParagraphLayout.DEFAULT_SPACING,0f);
     }
+
+    @Test public void contrastStrokeExceedsDefaultStrokeForMidAndDarkPanels() {
+        assertTrue(ParagraphLayout.CONTRAST_STROKE_SHARE > ParagraphLayout.STROKE_SHARE);
+        assertTrue(ParagraphLayout.outerStrokeWidth(24f, 0xff000000, ParagraphLayout.CONTRAST_STROKE_SHARE)
+                > ParagraphLayout.strokeWidth(24f));
+    }
+
+    @Test public void textPalettePreservesSameColorBoldingOnUniformWhiteAndAddsOuterRimOnGrayOrDark() {
+        int[] uniformBright = ParagraphLayout.textPalette(0xffffffff, false);
+        assertArrayEquals(new int[]{0xff202124, 0xff000000, 0}, uniformBright);
+
+        int[] mottledBright = ParagraphLayout.textPalette(0xffe6e6e6, true);
+        assertArrayEquals(new int[]{0xff202124, 0xff000000, 0xffffffff}, mottledBright);
+
+        int[] midGray = ParagraphLayout.textPalette(0xff9a9a9a, false);
+        assertArrayEquals(new int[]{0xfffafafa, 0xffffffff, 0xff000000}, midGray);
+
+        int[] black = ParagraphLayout.textPalette(0xff000000, false);
+        assertArrayEquals(new int[]{0xfffafafa, 0xffffffff, 0xff000000}, black);
+    }
 }

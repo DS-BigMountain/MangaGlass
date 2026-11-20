@@ -17,23 +17,45 @@ public final class RequestPolicy {
     public static String resolve(String url, String model, String preference) {
         if (!"auto".equals(preference)) return VALUES[index(preference)];
         String host = URI.create(TranslationProtocol.endpoint(url)).getHost().toLowerCase(Locale.ROOT);
-        if (host.equals("api.deepseek.com")) return "deepseek";
-        if (host.equals("api.openai.com")) {
-            if (model.matches("gpt-5(?:-mini|-nano)?(?:-\\d{4}-\\d{2}-\\d{2})?")) return "minimal";
-            if (model.matches("gpt-5\\.[1245](?:-\\d{4}-\\d{2}-\\d{2})?") || model.matches("gpt-5\\.6-(?:sol|terra|luna)(?:-\\d{4}-\\d{2}-\\d{2})?")) return "none";
-            if (model.matches("(?:o1|o3|o3-mini|o4-mini)(?:-\\d{4}-\\d{2}-\\d{2})?")) return "low";
+        String lowerModel = model == null ? "" : model.toLowerCase(Locale.ROOT);
+        if (host.equals("api.deepseek.com")
+                || host.endsWith(".volces.com")
+                || host.equals("open.bigmodel.cn")
+                || host.equals("api.moonshot.cn")
+                || host.equals("api.moonshot.ai")) {
+            return "deepseek";
+        }
+        if (host.equals("dashscope.aliyuncs.com")
+                || host.equals("dashscope-intl.aliyuncs.com")
+                || host.equals("dashscope-us.aliyuncs.com")
+                || host.equals("api.siliconflow.cn")
+                || host.equals("api.siliconflow.com")) {
+            return "qwen";
         }
         if (host.equals("openrouter.ai")) return "router";
-        if (host.equals("dashscope.aliyuncs.com") || host.equals("dashscope-intl.aliyuncs.com") || host.equals("dashscope-us.aliyuncs.com")) return "qwen";
+        if (host.equals("api.openai.com")) {
+            if (lowerModel.matches("gpt-5(?:-mini|-nano)?(?:-\\d{4}-\\d{2}-\\d{2})?")) return "minimal";
+            if (lowerModel.matches("gpt-5\\.[1245](?:-\\d{4}-\\d{2}-\\d{2})?")
+                    || lowerModel.matches("gpt-5\\.6-(?:sol|terra|luna)(?:-\\d{4}-\\d{2}-\\d{2})?")) return "none";
+            if (lowerModel.matches("(?:o1|o3|o3-mini|o4-mini)(?:-\\d{4}-\\d{2}-\\d{2})?")) return "low";
+        }
+        if (host.equals("generativelanguage.googleapis.com")) {
+            if (!lowerModel.startsWith("gemini-1") && !lowerModel.startsWith("gemini-2.0")
+                    && !lowerModel.startsWith("gemini-2.5-pro") && !lowerModel.startsWith("gemini-3")) {
+                return "none";
+            }
+        }
         return "default";
     }
     public static String apply(String body, String url, String model, String preference, ModelCatalog.Model info) throws Exception {
+        return apply(body, url, model, preference, info, true);
+    }
+    static String apply(String body, String url, String model, String preference, ModelCatalog.Model info,
+                        boolean allowJsonMode) throws Exception {
         JSONObject request = new JSONObject(body);
-        // A thinking-protocol override does not imply support for JSON mode on a gateway.
-        // Enable the documented capability only for screenshot requests to this provider.
-        String host=URI.create(TranslationProtocol.endpoint(url)).getHost();
-        if("api.deepseek.com".equalsIgnoreCase(host) && hasImage(request) && !request.has("response_format")) {
-            request.put("response_format",new JSONObject().put("type","json_object"));
+        String host = URI.create(TranslationProtocol.endpoint(url)).getHost().toLowerCase(Locale.ROOT);
+        if (allowJsonMode && supportsJsonObject(host) && !request.has("response_format")) {
+            request.put("response_format", new JSONObject().put("type", "json_object"));
         }
         String policy = resolve(url, model, preference);
         switch (policy) {
@@ -48,7 +70,6 @@ public final class RequestPolicy {
                     JSONArray efforts = reasoning.optJSONArray("supported_efforts");
                     String minimum = null;
                     if (efforts != null) {
-                        minimum = null;
                         for (int i = 0; i < efforts.length(); i++) {
                             String effort = efforts.getString(i);
                             if (!"none".equals(effort)) { minimum = effort; break; }
@@ -63,19 +84,19 @@ public final class RequestPolicy {
         }
         return request.toString();
     }
-    private static boolean hasImage(JSONObject request) {
-        JSONArray messages=request.optJSONArray("messages");
-        if(messages==null) return false;
-        for(int i=0;i<messages.length();i++) {
-            JSONObject message=messages.optJSONObject(i);
-            JSONArray parts=message==null ? null : message.optJSONArray("content");
-            if(parts==null) continue;
-            for(int j=0;j<parts.length();j++) {
-                JSONObject part=parts.optJSONObject(j);
-                if(part!=null && "image_url".equals(part.optString("type"))) return true;
-            }
-        }
-        return false;
+    private static boolean supportsJsonObject(String host) {
+        return host.equals("api.deepseek.com")
+                || host.equals("api.openai.com")
+                || host.equals("dashscope.aliyuncs.com")
+                || host.equals("dashscope-intl.aliyuncs.com")
+                || host.equals("dashscope-us.aliyuncs.com")
+                || host.equals("openrouter.ai")
+                || host.endsWith(".volces.com")
+                || host.equals("open.bigmodel.cn")
+                || host.equals("api.moonshot.cn")
+                || host.equals("api.moonshot.ai")
+                || host.equals("api.siliconflow.cn")
+                || host.equals("api.siliconflow.com");
     }
     public static String description(String url, String model, String preference) {
         String policy;

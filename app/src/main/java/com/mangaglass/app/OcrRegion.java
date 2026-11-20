@@ -10,6 +10,7 @@ final class OcrRegion {
     String text;
     float confidence;
     float lineHeight;
+    boolean vertical;
     final List<int[]> lines = new ArrayList<>();
     OcrRegion(int[] rect, String text, int[] firstLine, float lineHeight, float confidence) {
         this.rect = rect.clone();

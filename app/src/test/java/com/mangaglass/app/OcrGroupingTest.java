@@ -121,4 +121,57 @@ public class OcrGroupingTest {
         assertEquals(2, regions.size());
         assertEquals("◆ 条目\n条目说明", regions.get(1).text);
     }
+
+    @Test public void stripsSeparatedByPanelBorderStaySeparate() {
+        OcrLine rightPanel = new OcrLine(new int[]{108, 20, 128, 140}, "右格", .9f);
+        OcrLine leftPanel = new OcrLine(new int[]{72, 20, 92, 140}, "左格", .9f);
+        // Vertical black panel borders + white gutter between x=92 and x=108.
+        OcrGrouping.Pixels pixels = (x, y) -> (x == 96 || x == 97 || x == 104 || x == 105) ? BLACK : WHITE;
+        List<OcrRegion> regions = OcrGrouping.group(new ArrayList<>(Arrays.asList(rightPanel, leftPanel)),
+                pixels, 200, 200);
+        assertEquals(2, regions.size());
+        assertTrue(regions.get(0).vertical);
+        assertTrue(regions.get(1).vertical);
+    }
+
+    @Test public void stripsSeparatedByCurvedBubbleOutlineStaySeparate() {
+        OcrLine rightBubble = new OcrLine(new int[]{106, 20, 126, 140}, "右泡", .9f);
+        OcrLine leftBubble = new OcrLine(new int[]{74, 20, 94, 140}, "左泡", .9f);
+        // Curved speech bubble outline drifting across x=98..102 over y=20..140.
+        OcrGrouping.Pixels pixels = (x, y) -> {
+            int curveX = 100 + Math.round((float) Math.sin((y - 20) * Math.PI / 120.0) * 2f);
+            return Math.abs(x - curveX) <= 1 ? BLACK : WHITE;
+        };
+        List<OcrRegion> regions = OcrGrouping.group(new ArrayList<>(Arrays.asList(rightBubble, leftBubble)),
+                pixels, 200, 200);
+        assertEquals(2, regions.size());
+    }
+
+    @Test public void stripsWithBrokenFuriganaBetweenColumnsStillJoin() {
+        OcrLine rightCol = new OcrLine(new int[]{108, 20, 128, 140}, "右列", .9f);
+        OcrLine leftCol = new OcrLine(new int[]{76, 20, 96, 140}, "左列", .9f);
+        // Broken small ruby glyphs (height 7px separated by 12px gaps) between x=99..103.
+        OcrGrouping.Pixels pixels = (x, y) -> {
+            if (x >= 99 && x <= 103 && y >= 25 && y <= 130 && ((y - 25) % 19) < 7) return BLACK;
+            return WHITE;
+        };
+        List<OcrRegion> regions = OcrGrouping.group(new ArrayList<>(Arrays.asList(rightCol, leftCol)),
+                pixels, 200, 200);
+        assertEquals(1, regions.size());
+        assertEquals("右列 左列", regions.get(0).text);
+        assertTrue(regions.get(0).vertical);
+    }
+
+    @Test public void multiColumnWideSpeechBubbleStaysMarkedVertical() {
+        List<OcrLine> cols = new ArrayList<>();
+        for (int i = 0; i < 4; i++) {
+            int x = 140 - i * 32;
+            cols.add(new OcrLine(new int[]{x, 20, x + 22, 130}, "列" + i, .9f));
+        }
+        List<OcrRegion> regions = OcrGrouping.group(cols, (x, y) -> WHITE, 200, 200);
+        assertEquals(1, regions.size());
+        // Merged box is ~118x110 (width > height), yet originates from vertical strips.
+        assertTrue(regions.get(0).width() > regions.get(0).height());
+        assertTrue(regions.get(0).vertical);
+    }
 }

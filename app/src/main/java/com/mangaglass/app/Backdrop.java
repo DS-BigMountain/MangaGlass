@@ -92,6 +92,100 @@ final class Backdrop {
         return colors[row * columns + column];
     }
 
+    /**
+     * 外围边界一致且为非纯白底板（灰网点或黑底）时，把被原文白描边污染的内部块还原为外围底板色。
+     * 渐变与复杂插画背景因外围不一致而保持原貌。
+     */
+    Backdrop cleaned() {
+        if (rows < 3 || columns < 3) return this;
+        int perimeter = 2 * columns + 2 * (rows - 2);
+        int[] reds = new int[perimeter], greens = new int[perimeter], blues = new int[perimeter];
+        int[] border = new int[perimeter];
+        int count = 0;
+        for (int row = 0; row < rows; row++) {
+            for (int column = 0; column < columns; column++) {
+                if (row != 0 && row != rows - 1 && column != 0 && column != columns - 1) continue;
+                int c = colors[row * columns + column];
+                border[count] = c;
+                reds[count] = (c >>> 16) & 255;
+                greens[count] = (c >>> 8) & 255;
+                blues[count] = c & 255;
+                count++;
+            }
+        }
+        int base = consistentBase(border, reds, greens, blues, count, 7, 10);
+        if (base == 0) {
+            // 矮分镜内上下外扩块可能跨越白沟槽，回退检查左右两侧内行块是否同色。
+            int sideCount = 2 * (rows - 2);
+            if (sideCount >= 2) {
+                int[] sideColors = new int[sideCount];
+                int[] sR = new int[sideCount], sG = new int[sideCount], sB = new int[sideCount];
+                int sc = 0;
+                for (int row = 1; row < rows - 1; row++) {
+                    for (int column : new int[]{0, columns - 1}) {
+                        int c = colors[row * columns + column];
+                        sideColors[sc] = c;
+                        sR[sc] = (c >>> 16) & 255;
+                        sG[sc] = (c >>> 8) & 255;
+                        sB[sc] = c & 255;
+                        sc++;
+                    }
+                }
+                base = consistentBase(sideColors, sR, sG, sB, sc, 8, 10);
+            }
+        }
+        if (base == 0) return this;
+        int[] updated = colors.clone();
+        boolean changed = false;
+        for (int row = 1; row < rows - 1; row++) {
+            for (int column = 1; column < columns - 1; column++) {
+                int idx = row * columns + column;
+                if (colorDistance(updated[idx], base) > 48) {
+                    updated[idx] = base;
+                    changed = true;
+                }
+            }
+        }
+        return changed ? new Backdrop(left, top, block, columns, rows, updated) : this;
+    }
+
+    /** 识别亮暗混杂的网点或背景干扰块；均一纸色与平缓渐变返回 false。 */
+    boolean isMottled() {
+        int median = medianColor();
+        int total = 0, noisy = 0;
+        boolean useInterior = rows >= 3 && columns >= 3;
+        int rStart = useInterior ? 1 : 0, rEnd = useInterior ? rows - 1 : rows;
+        int cStart = useInterior ? 1 : 0, cEnd = useInterior ? columns - 1 : columns;
+        for (int r = rStart; r < rEnd; r++) {
+            for (int c = cStart; c < cEnd; c++) {
+                int color = colors[r * columns + c];
+                total++;
+                int lum = (((color >>> 16) & 255) * 3 + ((color >>> 8) & 255) * 6 + (color & 255)) / 10;
+                if (lum < 165 || colorDistance(color, median) > 75) noisy++;
+            }
+        }
+        return total > 0 && noisy * 4 >= total;
+    }
+
+    private static int consistentBase(int[] samples, int[] reds, int[] greens, int[] blues,
+                                      int count, int num, int den) {
+        if (count <= 0) return 0;
+        int base = medianColor(reds, greens, blues, count);
+        int lum = (((base >>> 16) & 255) * 3 + ((base >>> 8) & 255) * 6 + (base & 255)) / 10;
+        if (lum >= 200) return 0;
+        int matching = 0;
+        for (int i = 0; i < count; i++) {
+            if (colorDistance(samples[i], base) <= 48) matching++;
+        }
+        return matching * den >= count * num ? base : 0;
+    }
+
+    private static int colorDistance(int a, int b) {
+        return Math.abs(((a >>> 16) & 255) - ((b >>> 16) & 255))
+                + Math.abs(((a >>> 8) & 255) - ((b >>> 8) & 255))
+                + Math.abs((a & 255) - (b & 255));
+    }
+
     private static int medianColor(int[] reds, int[] greens, int[] blues, int count) {
         Arrays.sort(reds, 0, count);
         Arrays.sort(greens, 0, count);

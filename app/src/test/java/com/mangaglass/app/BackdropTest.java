@@ -62,4 +62,36 @@ public class BackdropTest {
         assertEquals(0xff3366cc,backdrop.medianColor());
         assertTrue(backdrop.columns>=1 && backdrop.rows>=1);
     }
+
+    @Test public void cleanedRestoresUniformDarkPanelCorruptedByWhiteHalos() throws Exception {
+        int panel = 0xff101010, whiteHalo = 0xffffffff;
+        // Source box [60, 40, 140, 120] has bright white halos inside, while outer panel is dark.
+        BubbleGeometry.Pixels pixels = (x, y) ->
+                (x >= 72 && x < 128 && y >= 52 && y < 108) ? whiteHalo : panel;
+        Backdrop dirty = Backdrop.of(new int[]{60, 40, 140, 120}, 200, 160, pixels);
+        Backdrop clean = dirty.cleaned();
+        assertEquals(panel, clean.medianColor());
+        assertEquals(panel, clean.colorAt(100, 80));
+    }
+
+    @Test public void cleanedPreservesVerticalGradient() throws Exception {
+        BubbleGeometry.Pixels pixels = (x, y) -> {
+            int gray = Math.max(0, Math.min(255, y * 255 / 199));
+            return 0xff000000 | (gray << 16) | (gray << 8) | gray;
+        };
+        Backdrop original = Backdrop.of(new int[]{60, 50, 140, 130}, 200, 200, pixels);
+        Backdrop clean = original.cleaned();
+        assertTrue(ParagraphLayout.luminance(clean.colorAt(100, 30)) < ParagraphLayout.luminance(clean.colorAt(100, 150)));
+    }
+
+    @Test public void mottledDetectsTexturedBrightBackdropAndSkipsUniformWhiteBubble() throws Exception {
+        Backdrop uniform = Backdrop.of(new int[]{60, 50, 140, 130}, 220, 200, solid(PAPER));
+        assertFalse(uniform.isMottled());
+
+        // 内部区块混杂暗部纹理与亮白底时视为干扰底板，且整体中值仍为亮色。
+        BubbleGeometry.Pixels mixed = (x, y) -> y < 72 ? 0xff404040 : PAPER;
+        Backdrop textured = Backdrop.of(new int[]{48, 48, 144, 144}, 192, 192, mixed).cleaned();
+        assertTrue(ParagraphLayout.luminance(textured.medianColor()) >= 195);
+        assertTrue(textured.isMottled());
+    }
 }

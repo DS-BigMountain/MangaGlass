@@ -69,4 +69,26 @@ public class SourceTextSizeTest {
         } catch(InterruptedException expected) { }
         finally { Thread.interrupted(); }
     }
+
+    @Test public void verticalFuriganaBandsDoNotShrinkMainKanjiSize() throws Exception {
+        // Box 160x100: three 24px main kanji columns plus three 8px narrow ruby columns.
+        BubbleGeometry.Pixels furiganaPage = (x, y) -> {
+            if (y < 10 || y >= 90) return WHITE;
+            boolean mainCol = (x >= 16 && x < 40) || (x >= 68 && x < 92) || (x >= 120 && x < 144);
+            boolean rubyCol = (x >= 44 && x < 52) || (x >= 96 && x < 104) || (x >= 148 && x < 156);
+            return (mainCol || rubyCol) ? BLACK : WHITE;
+        };
+        float size = SourceTextSize.inkSize(new int[]{0, 0, 160, 100}, furiganaPage, WHITE, WHITE, true);
+        assertEquals(24 * SourceTextSize.BAND_TO_SIZE, size, .01f);
+    }
+
+    @Test public void spaciousBubbleRaisesTinyEstimatedSizeIntoComfortableRange() {
+        // Spacious 220x260 speech bubble on a 1080p screen (preferred=48): 13px rises to comfortFloor ~31.2px.
+        float raised = OverlayLayout.comfortableSize(13f, 48f, 220, 260);
+        assertTrue(raised >= 30f && raised <= 39f);
+        // Tight 120x40 caption keeps its own 13px source size.
+        assertEquals(13f, OverlayLayout.comfortableSize(13f, 48f, 120, 40), .01f);
+        // Large emphasis text keeps its large size.
+        assertEquals(46f, OverlayLayout.comfortableSize(46f, 48f, 160, 160), .01f);
+    }
 }

@@ -18,8 +18,10 @@ import android.text.TextPaint;
 public final class ParagraphLayout {
     /** 默认行距比例，保持 V1.2.1 现状。 */
     static final float DEFAULT_SPACING = LineSpacing.FALLBACK;
-    /** 描边宽度相对字号的比例，落在 0.06~0.10 倍区间。 */
+    /** 默认描边宽度相对字号的比例，落在 0.06~0.10 倍区间，与填充同极性以维持字重饱满。 */
     static final float STROKE_SHARE = .08f;
+    /** 灰底、暗底及干扰背景下的外层反差描边总宽度比例，严格位于同色加粗轮廓之外。 */
+    static final float CONTRAST_STROKE_SHARE = .20f;
     /** 描边宽度的下限（像素）。 */
     static final float MIN_STROKE = .5f;
 
@@ -72,12 +74,13 @@ public final class ParagraphLayout {
         public final int padding;
         public final String fullText;
         private final float spacing;
-        private final float strokeWidth;
-        private final int fillColor, strokeColor;
+        private final float strokeWidth, outerStrokeWidth;
+        private final int fillColor, strokeColor, outerStrokeColor;
         private final VerticalParagraphLayout vertical;
 
         Flow(StaticLayout text, float fontSize, int padding, String fullText,
-             float spacing, int fillColor, int strokeColor, VerticalParagraphLayout vertical) {
+             float spacing, int fillColor, int strokeColor, int outerStrokeColor,
+             float outerStrokeShare, VerticalParagraphLayout vertical) {
             this.text = text;
             this.fontSize = fontSize;
             this.padding = padding;
@@ -86,6 +89,8 @@ public final class ParagraphLayout {
             this.fillColor = fillColor;
             this.strokeColor = strokeColor;
             this.strokeWidth = strokeWidth(fontSize);
+            this.outerStrokeColor = outerStrokeColor;
+            this.outerStrokeWidth = outerStrokeWidth(fontSize, outerStrokeColor, outerStrokeShare);
             this.vertical = vertical;
         }
 
@@ -98,16 +103,16 @@ public final class ParagraphLayout {
         /** 横排行距比例，竖排段落按每字一行的固定行步绘制。 */
         public float spacing() { return spacing; }
 
-        /** 先描边后填充；竖排段落按列自右向左绘制。 */
+        /** 可选外围反差描边与同色加粗描边均先于填充绘制；竖排段落按列自右向左绘制。 */
         void draw(Canvas canvas, Rect bounds) {
             if (vertical != null) {
-                vertical.draw(canvas, bounds, strokeWidth, strokeColor, fillColor);
+                vertical.draw(canvas, bounds, strokeWidth, strokeColor, outerStrokeWidth, outerStrokeColor, fillColor);
                 return;
             }
             canvas.save();
             canvas.clipRect(bounds);
             canvas.translate(bounds.left + padding, bounds.top + padding);
-            drawOutlined(canvas, text, fillColor, strokeColor, strokeWidth);
+            drawOutlined(canvas, text, fillColor, strokeColor, strokeWidth, outerStrokeColor, outerStrokeWidth);
             canvas.restore();
         }
     }
@@ -117,6 +122,23 @@ public final class ParagraphLayout {
     /** 描边宽度随字号取 0.08 倍，落在 0.06~0.10 倍区间。 */
     static float strokeWidth(float fontSize) {
         return Math.max(MIN_STROKE, fontSize * STROKE_SHARE);
+    }
+
+    /** 仅当存在外围反差描边且宽于加粗描边时返回外轮廓线宽，其余情形返回 0。 */
+    static float outerStrokeWidth(float fontSize, int outerStrokeColor, float outerStrokeShare) {
+        if (outerStrokeColor == 0 || outerStrokeShare <= STROKE_SHARE) return 0f;
+        return Math.max(MIN_STROKE, fontSize * outerStrokeShare);
+    }
+
+    /**
+     * 按背景亮度与均一性选择文字前景色、同色加粗描边与外围反差描边：
+     * {fillColor, coreStrokeColor, outerStrokeColor}，其中 outerStrokeColor 为 0 表示仅保留双层加粗描绘。
+     */
+    static int[] textPalette(int background, boolean mottled) {
+        if (luminance(background) >= 195) {
+            return new int[]{0xff202124, 0xff000000, mottled ? 0xffffffff : 0};
+        }
+        return new int[]{0xfffafafa, 0xffffffff, 0xff000000};
     }
 
     /** 描边色取背景反色：背景亮时用深色描边，背景暗时用浅色描边。 */
@@ -134,10 +156,21 @@ public final class ParagraphLayout {
     }
 
     private static void drawOutlined(Canvas canvas, StaticLayout layout, int fillColor, int strokeColor, float strokeWidth) {
+        drawOutlined(canvas, layout, fillColor, strokeColor, strokeWidth, 0, 0f);
+    }
+
+    private static void drawOutlined(Canvas canvas, StaticLayout layout, int fillColor, int strokeColor, float strokeWidth,
+                                     int outerStrokeColor, float outerStrokeWidth) {
         TextPaint paint = layout.getPaint();
-        paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeJoin(Paint.Join.ROUND);
         paint.setStrokeCap(Paint.Cap.ROUND);
+        if (outerStrokeColor != 0 && outerStrokeWidth > strokeWidth) {
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(outerStrokeWidth);
+            paint.setColor(outerStrokeColor);
+            layout.draw(canvas);
+        }
+        paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(strokeWidth);
         paint.setColor(strokeColor);
         layout.draw(canvas);
@@ -194,6 +227,11 @@ public final class ParagraphLayout {
     /** 横排流式段落，行距与描边色由源图估计结果给出。 */
     public static Flow flow(String value, int width, float preferredSize, int color, boolean centered,
                             float spacing, int strokeColor) {
+        return flow(value, width, preferredSize, color, centered, spacing, strokeColor, 0, 0f);
+    }
+
+    static Flow flow(String value, int width, float preferredSize, int color, boolean centered,
+                     float spacing, int strokeColor, int outerStrokeColor, float outerStrokeShare) {
         int outer = Math.max(1, width);
         String fullText = normalize(value);
         float preferred = Math.max(1, preferredSize);
@@ -218,20 +256,30 @@ public final class ParagraphLayout {
             }
         }
         return new Flow(best, best.getPaint().getTextSize(), padding, fullText,
-                lineSpacing, color, strokeColor, null);
+                lineSpacing, color, strokeColor, outerStrokeColor, outerStrokeShare, null);
     }
 
     /** 竖排流式段落：每字一格，逐列自右向左回填。 */
     public static Flow verticalFlow(String value, int width, float preferredSize, int color, boolean centered,
                                     int strokeColor) {
+        return verticalFlow(value, width, 0, preferredSize, color, centered, strokeColor, 0, 0f);
+    }
+
+    public static Flow verticalFlow(String value, int width, int maxHeight, float preferredSize, int color, boolean centered,
+                                    int strokeColor) {
+        return verticalFlow(value, width, maxHeight, preferredSize, color, centered, strokeColor, 0, 0f);
+    }
+
+    static Flow verticalFlow(String value, int width, int maxHeight, float preferredSize, int color, boolean centered,
+                             int strokeColor, int outerStrokeColor, float outerStrokeShare) {
         int outer = Math.max(1, width);
-        VerticalParagraphLayout vertical = VerticalParagraphLayout.create(value, outer, preferredSize, centered, color, strokeColor);
+        VerticalParagraphLayout vertical = VerticalParagraphLayout.create(value, outer, maxHeight, preferredSize, centered, color, strokeColor);
         Layout.Alignment alignment = centered ? Layout.Alignment.ALIGN_CENTER : Layout.Alignment.ALIGN_NORMAL;
         // 兼容视图：既有测量接口读取 text 字段，这里保留一份横向测量结果承载完整文本。
         StaticLayout measured = create(vertical.fullText(), Math.max(1, outer - 2 * vertical.padding()),
                 vertical.fontSize(), color, alignment, DEFAULT_SPACING);
         return new Flow(measured, vertical.fontSize(), vertical.padding(), vertical.fullText(),
-                DEFAULT_SPACING, color, strokeColor, vertical);
+                DEFAULT_SPACING, color, strokeColor, outerStrokeColor, outerStrokeShare, vertical);
     }
 
     static boolean horizontalFits(StaticLayout layout, int width) {
@@ -257,7 +305,7 @@ public final class ParagraphLayout {
     @android.annotation.SuppressLint("InlinedApi")
     private static StaticLayout create(String value, int width, float size, int color, Layout.Alignment alignment, float spacing) {
         TextPaint font = new TextPaint(TextPaint.ANTI_ALIAS_FLAG | TextPaint.SUBPIXEL_TEXT_FLAG);
-        font.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        font.setTypeface(Ui.typeface(550));
         font.setTextSize(size);
         font.setColor(color);
         font.setTextLocale(java.util.Locale.SIMPLIFIED_CHINESE);

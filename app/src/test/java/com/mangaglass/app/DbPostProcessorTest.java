@@ -64,4 +64,10 @@ public class DbPostProcessorTest {
     public void oversizedMapIsRejected() {
         DbPostProcessor.boxes(new float[1], 0, 1, 10, 10, DbPostProcessor.Params.GENERAL);
     }
+
+    @Test public void narrowTwoPixelMangaCoreIsRetained() {
+        float[] map = map(64, 64, new int[][]{{20, 10, 22, 16}});
+        List<int[]> boxes = DbPostProcessor.boxes(map, 64, 64, 640, 640, DbPostProcessor.Params.MANGA);
+        assertEquals(1, boxes.size());
+    }
 }

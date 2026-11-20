@@ -1,23 +1,79 @@
 package com.mangaglass.app;
 
 import android.content.Context;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
+import android.graphics.drawable.RippleDrawable;
+import android.os.Build;
 import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
 final class Ui {
-    static final int BG = Color.WHITE, INK = 0xff242529, GREEN = 0xff343539, MUTED = 0xff777a80, SURFACE = 0xfff1f2f4, LINE = 0xffe7e8eb;
+    static final int BG = Color.WHITE, INK = 0xff000000, GREEN = 0xff343539, CONTINUOUS = 0xff167956, MUTED = 0xff777a80, SURFACE = 0xfff1f2f4, LINE = 0xffe7e8eb;
+    static final int APPLE_BLUE = 0xff007aff;
+    static final int APPLE_BLUE_TINT = 0x1a007aff;
+    static final int APPLE_GREEN = 0xff34c759;
+    static final int APPLE_GREEN_RING = 0x1c34c759;
+    static final int APPLE_RED = 0xffff3b30;
+    static final int APPLE_RED_TINT = 0x1aff3b30;
+    static final int APPLE_ORANGE = 0xffff9500;
+    static final int APPLE_GROUP = 0xfff2f2f7;
+    static final int APPLE_SEG_BG = 0x1f767680;
+    static final int APPLE_SEP = 0x1f3c3c43;
+    static final int APPLE_LABEL_2 = 0x993c3c43;
+    static final int APPLE_LABEL_3 = 0x4d3c3c43;
+
     static int dp(Context context, float value) { return Math.round(value * context.getResources().getDisplayMetrics().density); }
+    static Typeface typeface(int weight) {
+        if (Build.VERSION.SDK_INT >= 28) return Typeface.create(Typeface.SANS_SERIF, weight, false);
+        if (weight >= 650) return Typeface.create("sans-serif", Typeface.BOLD);
+        if (weight >= 500) return Typeface.create("sans-serif-medium", Typeface.NORMAL);
+        return Typeface.create("sans-serif", Typeface.NORMAL);
+    }
     static GradientDrawable shape(int color, float radius, Context context) {
         GradientDrawable d = new GradientDrawable(); d.setColor(color); d.setCornerRadius(dp(context, radius)); return d;
     }
+    static GradientDrawable oval(int color) {
+        GradientDrawable d = new GradientDrawable(); d.setShape(GradientDrawable.OVAL); d.setColor(color); return d;
+    }
+    static Drawable orbBackground(Context context, int coreColor, int ringColor, int ringDp) {
+        int inset = dp(context, ringDp);
+        if (ringColor == 0 || inset <= 0) return ripple(0x28ffffff, oval(coreColor));
+        LayerDrawable layers = new LayerDrawable(new Drawable[]{oval(ringColor), oval(coreColor)});
+        layers.setLayerInset(1, inset, inset, inset, inset);
+        return ripple(0x28ffffff, layers);
+    }
+    static RippleDrawable ripple(int rippleColor, Drawable content) {
+        return new RippleDrawable(ColorStateList.valueOf(rippleColor), content, null);
+    }
+    static void softShadow(View view, float elevationDp, int spotColor) {
+        view.setElevation(elevationDp <= 0 ? 0f : dp(view.getContext(), elevationDp));
+        if (Build.VERSION.SDK_INT >= 28 && elevationDp > 0) {
+            view.setOutlineSpotShadowColor(spotColor);
+            view.setOutlineAmbientShadowColor(0x14000000);
+        }
+    }
+    static void unclip(android.view.ViewGroup group) {
+        group.setClipChildren(false);
+        group.setClipToPadding(false);
+    }
+    static GradientDrawable borderedShape(int color, int strokeColor, float strokeDp, float radius, Context context) {
+        GradientDrawable d = shape(color, radius, context);
+        if (strokeDp > 0) d.setStroke(Math.max(1, dp(context, strokeDp)), strokeColor);
+        return d;
+    }
     static TextView text(Context c, String value, int size, int color, boolean bold) {
+        return text(c, value, (float) size, color, bold ? 650 : 400);
+    }
+    static TextView text(Context c, String value, float size, int color, int weight) {
         TextView v = new TextView(c); v.setText(value); v.setTextSize(size); v.setTextColor(color);
-        v.setLineSpacing(dp(c, 3), 1); if (bold) v.setTypeface(Typeface.DEFAULT, Typeface.BOLD); return v;
+        v.setLineSpacing(dp(c, 3), 1); v.setTypeface(typeface(weight)); return v;
     }
     static LinearLayout column(Context c) { LinearLayout v = new LinearLayout(c); v.setOrientation(LinearLayout.VERTICAL); return v; }
     static LinearLayout card(Context c, int color) {

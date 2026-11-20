@@ -25,19 +25,31 @@ final class SourceTextSize {
     static float estimate(TextRegion region, BubbleGeometry.Pixels pixels, int top, int bottom, float fallback) throws InterruptedException {
         Rect box=region.bounds;
         boolean eastAsian=eastAsian(region.source);
-        boolean vertical=box.height()>box.width()*1.8f && eastAsian;
+        boolean vertical=region.vertical!=null ? (region.vertical && eastAsian) : (box.height()>box.width()*1.8f && eastAsian);
+        return estimate(region,pixels,top,bottom,fallback,vertical);
+    }
+    static float estimate(TextRegion region, BubbleGeometry.Pixels pixels, int top, int bottom, float fallback, boolean vertical) throws InterruptedException {
+        Rect box=region.bounds;
         int[] bounds={box.left,box.top,box.right,box.bottom};
         float measured=inkSize(bounds,pixels,top,bottom,vertical);
         if(measured>0) {
-            // 墨迹带对断行敏感，密集核心对零星笔画敏感，两项按文字脚本加权后互补。
+            // 墨迹带对断行敏感，密集核心对零星笔画敏感，两项按文字脚本加权后互补；
+            // 竖排汉字拆分出的细笔画不应把主字号大幅拉低。
             float core=coreSize(bounds,pixels,top,bottom,vertical);
-            float fused=core>0 ? fuse(measured,core,region.source) : measured;
+            float adjustedCore=core>0 ? Math.max(core,measured*.75f) : 0;
+            float fused=adjustedCore>0 ? fuse(measured,adjustedCore,region.source) : measured;
             return Math.max(8,Math.min(fallback*2,fused));
         }
-        if(region.source.trim().isEmpty()) return fallback;
+        float core=coreSize(bounds,pixels,top,bottom,vertical);
+        if(region.source.trim().isEmpty()) return core>0 ? Math.max(8,Math.min(fallback*2,core)) : fallback;
         // 高瘦的日文列沿阅读方向量测，整段高度会偏离单个字高。
         Rect measure=vertical ? new Rect(0,0,box.height(),box.width()) : box;
-        return Math.max(8,ParagraphLayout.fit(region.source,measure,fallback,0xff000000,false).fontSize);
+        float layoutSize=Math.max(8,ParagraphLayout.fit(region.source,measure,fallback,0xff000000,false).fontSize);
+        if(core>0) {
+            float floor=Math.min(layoutSize,fallback*.65f);
+            return Math.max(8,Math.min(fallback*2,Math.max(core,floor)));
+        }
+        return layoutSize;
     }
 
     /** 按文字脚本融合两项估计：CJK 偏向墨迹带，拉丁偏向密集核心。 */
@@ -79,9 +91,14 @@ final class SourceTextSize {
         if(start>=0 && last-start>=3) { bands.add(last-start+1); clipped|=start==0 || last==rows-1; }
         if(!clipped && !bands.isEmpty() && bands.size()<=100 && ink>=4 && ink<(long)rows*columns*.55f) {
             Collections.sort(bands);
-            int median=bands.get(bands.size()/2),consistent=0;
-            for(int band:bands) if(band>=median*.6f && band<=median*1.5f) consistent++;
-            if(median>=5 && consistent>=Math.ceil(bands.size()*.8))
+            // 注音假名（ルビ）宽度显著小于正文列，以高分位带宽过滤次级注音带后再求主字号。
+            int upper=bands.get((int)(bands.size()*.75));
+            List<Integer> primary=new ArrayList<>(bands.size());
+            for(int band:bands) if(band>=upper*.55f) primary.add(band);
+            if(primary.isEmpty()) primary=bands;
+            int median=primary.get(primary.size()/2),consistent=0;
+            for(int band:primary) if(band>=median*.6f && band<=median*1.5f) consistent++;
+            if(median>=5 && consistent>=Math.ceil(primary.size()*.8))
                 return median*BAND_TO_SIZE;
         }
         return 0;

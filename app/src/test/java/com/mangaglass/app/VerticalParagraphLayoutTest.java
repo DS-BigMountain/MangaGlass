@@ -48,4 +48,42 @@ public class VerticalParagraphLayoutTest {
         assertTrue(VerticalParagraphLayout.hasCjk("漢字かな"));
         assertFalse(VerticalParagraphLayout.hasCjk("plain latin"));
     }
+
+    @Test public void heightAwareMetricsFillsVerticalColumnsInsteadOfStubbyRows() {
+        // Wide bubble (220x240) with 10 chars at 24px: uses 2 vertical columns of 5 rows, not 6 stubby columns.
+        VerticalParagraphLayout.Metrics metrics = VerticalParagraphLayout.metrics(10, 220, 240, 24);
+        assertEquals(2, metrics.usedColumns);
+        assertEquals(5, metrics.rows);
+    }
+
+    @Test public void verticalColumnLanesDistinguishesVerticalColumnsFromHorizontalRows() {
+        // 3 vertical columns separated by blank x-gutters inside a square 90x90 box.
+        BubbleGeometry.Pixels verticalCols = (x, y) -> {
+            if (y >= 10 && y < 80 && ((x >= 12 && x < 24) || (x >= 38 && x < 50) || (x >= 64 && x < 76))) {
+                return 0xff000000;
+            }
+            return 0xffffffff;
+        };
+        assertTrue(VerticalParagraphLayout.hasVerticalColumnLanes(0, 0, 90, 90, verticalCols, 0xffffffff, 0xffffffff));
+
+        // 3 horizontal rows separated by blank y-gutters inside the same 90x90 box.
+        BubbleGeometry.Pixels horizontalRows = (x, y) -> {
+            if (x >= 10 && x < 80 && ((y >= 12 && y < 24) || (y >= 38 && y < 50) || (y >= 64 && y < 76))) {
+                return 0xff000000;
+            }
+            return 0xffffffff;
+        };
+        assertFalse(VerticalParagraphLayout.hasVerticalColumnLanes(0, 0, 90, 90, horizontalRows, 0xffffffff, 0xffffffff));
+    }
+
+    @Test public void horizontalUsedWheneverThreeOrMoreCharsFitAndVerticalOnlyForTwoOrFewer() {
+        // 24px font: 2-char wide box (56px, available=48 < 70.8) uses vertical; 3-char wide box (88px, available=76 >= 70.8) uses horizontal.
+        assertTrue(VerticalParagraphLayout.preferVertical(56, 140, 24f, true));
+        assertTrue(VerticalParagraphLayout.preferVertical(70, 140, 24f, true));
+        assertFalse(VerticalParagraphLayout.preferVertical(88, 140, 24f, true));
+        assertFalse(VerticalParagraphLayout.preferVertical(160, 200, 24f, true));
+        // Wide short box or non-CJK never switches to vertical.
+        assertFalse(VerticalParagraphLayout.preferVertical(56, 40, 24f, true));
+        assertFalse(VerticalParagraphLayout.preferVertical(56, 140, 24f, false));
+    }
 }
