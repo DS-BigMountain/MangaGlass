@@ -7,8 +7,8 @@ android {
         applicationId = "com.mangaglass.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 15
-        versionName = "V1.6.0"
+        versionCode = 16
+        versionName = "V1.6.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     compileOptions {

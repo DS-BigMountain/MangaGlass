@@ -18,9 +18,9 @@
 
 左图为翻译前的原页面与悬浮球，右图为点击悬浮球后的译文覆盖效果；点按画面可随时对照原图。
 
-![示例一：日文竖排对白页面的翻译前后对照](screenshots/example-1.png)
+![示例一：日文竖排对白页面的翻译前后对照](screenshots/example-1.jpg)
 
-![示例二：对话框页面的翻译前后对照](screenshots/example-2.png)
+![示例二：深浅背景混排页面的翻译前后对照](screenshots/example-2.jpg)
 
 ## 运行条件
 

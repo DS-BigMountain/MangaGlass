@@ -192,7 +192,7 @@ final class DbPostProcessor {
                     }
                 }
             }
-            int minSplitGap = Math.max(12, Math.round(bh * .62f));
+            int minSplitGap = Math.max(16, Math.round(bh * 1.15f));
             List<int[]> segments = new ArrayList<>();
             int segStart = -1, gapStart = -1;
             for (int x = 0; x < bw; x++) {

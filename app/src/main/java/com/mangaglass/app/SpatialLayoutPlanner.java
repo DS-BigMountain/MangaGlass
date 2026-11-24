@@ -65,6 +65,7 @@ final class SpatialLayoutPlanner {
         boolean isProse;
         boolean isShortLabel;
         boolean hasCore;
+        boolean hasSurface;
         boolean drawRim;
 
         int[] sourceRect;
@@ -83,6 +84,7 @@ final class SpatialLayoutPlanner {
         float harmonizedFontSize;
         float pitchRatio = 1.15f;
         float maxOverhang;
+        float maxOverhangLeft;
         int padding;
         int allowedRows;
         float availableWidth;
@@ -92,6 +94,7 @@ final class SpatialLayoutPlanner {
         List<int[]> strips = new ArrayList<>();
         int[] stripBottoms = new int[0];
         String[] glyphs = new String[0];
+        List<VerticalTypography.Token> verticalTokens = Collections.emptyList();
 
         Item(int index) { this.index = index; }
     }
@@ -199,7 +202,8 @@ final class SpatialLayoutPlanner {
                 if (OcrRegion.valid(cl)) item.detectedLines.add(cl);
             }
             lineHeights[i] = s.sourceLineHeight;
-            boolean isCol = (Boolean.TRUE.equals(s.vertical) && isVerticalSource(item.detectedLines, clipped))
+            boolean isCol = (Boolean.TRUE.equals(s.vertical)
+                    && (isVerticalSource(item.detectedLines, clipped) || VerticalTypography.hasCjk(s.translated)))
                     || (s.vertical == null && isVerticalSource(item.detectedLines, clipped));
             if (isCol) {
                 columns[i] = true;
@@ -210,11 +214,18 @@ final class SpatialLayoutPlanner {
                         int[] l = item.detectedLines.get(k);
                         widths[k] = Math.max(1, l[2] - l[0]);
                     }
+                    Arrays.sort(widths);
+                    lineHeights[i] = Math.max(1f, widths[widths.length / 2]);
                 } else {
-                    widths = new int[]{Math.max(1, clipped[2] - clipped[0])};
+                    int bw = Math.max(1, clipped[2] - clipped[0]);
+                    int bh = Math.max(1, clipped[3] - clipped[1]);
+                    if (bw * 3 >= bh * 2 && s.translated.length() >= 6) {
+                        int estCols = Math.max(2, Math.min(6, Math.round((float) bw / Math.max(14f, bh * .26f))));
+                        lineHeights[i] = Math.max(12f, (float) bw / estCols);
+                    } else {
+                        lineHeights[i] = Math.max(1f, bw);
+                    }
                 }
-                Arrays.sort(widths);
-                lineHeights[i] = Math.max(1f, widths[widths.length / 2]);
             }
             boolean detectedRows = !pixels.lines.isEmpty() && pixels.lineHeight >= 8f;
             if (!s.hasSourceGeometry && detectedRows) {
@@ -272,6 +283,7 @@ final class SpatialLayoutPlanner {
             int extBg = analyzeBackground(argb, width, height, source);
             int bgColor = hasSurface[i] ? surfaceColors[i] : extBg;
             item.backgroundColor = bgColor;
+            item.hasSurface = hasSurface[i];
             float detectedHeight = lineHeights[i];
             item.detectedHeight = detectedHeight;
             item.coreHeight = coreHeights[i];
@@ -347,11 +359,17 @@ final class SpatialLayoutPlanner {
                 area[2] = source[2] + symM;
             }
             float maxOverhang = overhangAllowance;
+            float maxOverhangLeft = overhangAllowance;
             if (!item.coverOnly && s.hasSourceGeometry) {
                 for (int[] other : protectedRegions) {
                     if (!OcrRegion.valid(other) || Arrays.equals(other, source) || conflicts(source, other)) continue;
-                    if (other[1] < area[3] && other[3] > area[1] && other[0] >= source[2]) {
-                        maxOverhang = Math.min(maxOverhang, Math.max(0, other[0] - area[2]));
+                    if (other[1] < area[3] && other[3] > area[1]) {
+                        if (other[0] >= source[2]) {
+                            maxOverhang = Math.min(maxOverhang, Math.max(0, other[0] - area[2] - 2));
+                        }
+                        if (other[2] <= source[0]) {
+                            maxOverhangLeft = Math.min(maxOverhangLeft, Math.max(0, area[0] - other[2] - 2));
+                        }
                     }
                 }
                 int scanEnd = Math.min(width, area[2] + (int) overhangAllowance);
@@ -361,9 +379,22 @@ final class SpatialLayoutPlanner {
                         break;
                     }
                 }
+                int scanLeft = Math.max(0, area[0] - (int) overhangAllowance);
+                for (int x = area[0] - 1; x >= scanLeft; x--) {
+                    if (isVBorderCol(argb, width, height, x, source[1], source[3], bgColor)) {
+                        maxOverhangLeft = Math.min(maxOverhangLeft, Math.max(0, area[0] - (x + 1)));
+                        break;
+                    }
+                }
+            }
+            if (item.centerAligned) {
+                float symCap = Math.min(maxOverhang, maxOverhangLeft);
+                maxOverhang = symCap * 2f;
+                maxOverhangLeft = symCap;
             }
             item.areaRect = area;
             item.maxOverhang = maxOverhang;
+            item.maxOverhangLeft = maxOverhangLeft;
             int areaW = Math.max(1, area[2] - area[0]);
             int areaH = Math.max(1, area[3] - area[1]);
             item.padding = Math.max(0, Math.min(pad, (Math.min(areaW, areaH) - 1) / 2));
@@ -372,10 +403,29 @@ final class SpatialLayoutPlanner {
 
             // Pixel-level stroke-only surface repair.
             int grow = Math.max(4, (int) Math.ceil((detectedHeight > 0 ? detectedHeight : 12f) * .12f));
+            int rightGrow = grow;
+            if (columns[i] && hasSurface[i] && detectedHeight >= 16f) {
+                // Extend slightly to the right of vertical Japanese columns to cleanly erase adjacent undetected furigana.
+                int rubyPad = Math.max(grow, Math.min(24, Math.round(detectedHeight * .36f)));
+                int safeRight = Math.min(width, area[2] + rubyPad);
+                for (int x = area[2]; x < safeRight; x++) {
+                    if (isVBorderCol(argb, width, height, x, source[1], source[3], bgColor)) {
+                        safeRight = x;
+                        break;
+                    }
+                }
+                for (int[] other : protectedRegions) {
+                    if (!OcrRegion.valid(other) || Arrays.equals(other, source)) continue;
+                    if (other[1] < area[3] && other[3] > area[1] && other[0] >= source[2]) {
+                        safeRight = Math.min(safeRight, other[0]);
+                    }
+                }
+                rightGrow = Math.max(grow, safeRight - area[2]);
+            }
             int[] coverRect = {
                     Math.max(0, area[0] - grow),
                     Math.max(0, area[1] - grow),
-                    Math.min(width, area[2] + grow),
+                    Math.min(width, area[2] + rightGrow),
                     Math.min(height, area[3] + grow)
             };
             if (OcrRegion.valid(coverRect)) {
@@ -388,10 +438,11 @@ final class SpatialLayoutPlanner {
                 final boolean cHasInk = hasTextColor[i];
                 final int cInk = textColors[i];
                 final int cGrow = grow;
+                final int cRightGrow = rightGrow;
                 final float cDetH = detectedHeight;
                 final boolean cCol = columns[i];
                 coverJobs.add(() -> targetItem.coverArgb = buildCover(argb, width, height, cRect, cSource,
-                        targetItem.detectedLines, cBg, cReliable, cHasInk, cInk, cGrow, cDetH, cCol));
+                        targetItem.detectedLines, cBg, cReliable, cHasInk, cInk, cGrow, cRightGrow, cDetH, cCol));
             }
 
             // Text color and rim readability.
@@ -400,12 +451,12 @@ final class SpatialLayoutPlanner {
             item.textColor = readableTextColor(rawTextColor, bgColor);
             float surfLum = luminance(bgColor);
             float fillLum = luminance(item.textColor);
-            if (surfLum >= 150f && fillLum < surfLum) {
-                // Crisp dark or colored ink on light surface: keep native look without dark crust.
+            if (hasSurface[i] && surfLum >= 150f && fillLum < surfLum) {
+                // Crisp dark or colored ink on verified uniform light surface: keep native look without crust.
                 item.drawRim = false;
                 item.rimColor = bgColor;
             } else {
-                // Light/colored ink on dark, gradient, or artwork surface: subtle dark rim boosts legibility.
+                // Light/colored ink or non-uniform/gradient/artwork background: contrasting rim guarantees legibility.
                 item.drawRim = true;
                 item.rimColor = fillLum >= 128f ? 0xff000000 : 0xffffffff;
             }
@@ -464,14 +515,17 @@ final class SpatialLayoutPlanner {
                 if (i == j) continue;
                 Item itemJ = items.get(j);
                 if (itemJ.suppressed || itemJ.coverOnly || itemJ.column != itemI.column) continue;
-                if (colorDist(itemI.backgroundColor, itemJ.backgroundColor) > 45) continue;
+                int bgTol = (!itemI.column && itemI.isProse && itemJ.isProse) ? 68 : 45;
+                if (colorDist(itemI.backgroundColor, itemJ.backgroundColor) > bgTol) continue;
                 float hpJ = itemJ.harmonizedFontSize;
-                if (Math.max(hpI, hpJ) > Math.min(hpI, hpJ) * 1.15f) continue;
+                if (Math.max(hpI, hpJ) > Math.min(hpI, hpJ) * 1.18f) continue;
                 if (fittedSizes[j] >= hpJ - .5f) continue;
                 int[] ri = itemI.sourceRect, rj = itemJ.sourceRect;
                 boolean coupled = false;
                 if (itemI.column) {
-                    coupled = rectGap(ri, rj) <= Math.max(140, Math.round(hpI * 7f));
+                    // A cramped 1-column bubble (e.g. a narrow side exclamation) must not shrink roomy multi-column peers.
+                    boolean roomyCol = itemJ.strips.size() >= 2 || itemI.strips.size() <= 1;
+                    coupled = roomyCol && rectGap(ri, rj) <= Math.max(140, Math.round(hpI * 7f));
                 } else {
                     boolean roomyPeer = itemJ.availableWidth >= hpJ * 4.5f || itemJ.detectedLines.size() >= 2;
                     if (!roomyPeer) continue;
@@ -479,13 +533,13 @@ final class SpatialLayoutPlanner {
                     int cxI = (ri[0] + ri[2]) / 2, cxJ = (rj[0] + rj[2]) / 2;
                     boolean aligned = Math.abs(ri[0] - rj[0]) <= Math.max(28, Math.round(hpI * 1.8f))
                             || Math.abs(cxI - cxJ) <= Math.max(24, Math.round(hpI * 1.5f));
-                    if (itemI.isProse && itemJ.isProse && aligned && vGap <= Math.max(100, Math.round(hpI * 5f))) {
+                    if (itemI.isProse && itemJ.isProse && aligned && vGap <= Math.max(140, Math.round(hpI * 6f))) {
                         coupled = true;
                     } else if (rectGap(ri, rj) <= Math.max(48, Math.round(hpI * 2.5f))) {
                         coupled = true;
                     }
                 }
-                if (coupled && fittedSizes[j] >= Math.max(minFloor, hpI * .65f)) {
+                if (coupled && fittedSizes[j] >= Math.max(minFloor, hpI * .55f)) {
                     minPeer = Math.min(minPeer, fittedSizes[j]);
                 }
             }
@@ -548,18 +602,11 @@ final class SpatialLayoutPlanner {
 
     private static void prepareVerticalColumn(int[] argb, int width, int height, Item item, Input s,
                                               boolean hasSurface, int surfaceColor) {
-        List<String> glyphList = new ArrayList<>();
-        String text = s.translated;
-        for (int at = 0; at < text.length(); ) {
-            int cp = text.codePointAt(at);
-            int len = Character.charCount(cp);
-            if (cp != '\r' && cp != '\n' && cp != ' ' && cp != '\t') {
-                glyphList.add(text.substring(at, at + len));
-            }
-            at += len;
-        }
+        item.verticalTokens = VerticalTypography.tokenize(s.translated);
+        List<String> glyphList = new ArrayList<>(item.verticalTokens.size());
+        for (VerticalTypography.Token tok : item.verticalTokens) glyphList.add(tok.text);
         item.glyphs = glyphList.toArray(new String[0]);
-        item.displayText = text;
+        item.displayText = s.translated;
         for (int[] line : item.detectedLines) {
             if (OcrRegion.valid(line)) item.strips.add(line);
         }
@@ -595,7 +642,14 @@ final class SpatialLayoutPlanner {
             }
             item.stripBottoms[k] = limitY;
         }
-        item.preferredFontSize = Math.max(9f, item.detectedHeight * .90f);
+        item.preferredFontSize = Math.max(9f, item.detectedHeight * .86f);
+    }
+
+    static VerticalTypography.Layout buildVerticalLayout(Item item, float targetPreferred, boolean allowShrink,
+                                                         int[] argb, int width, int height) {
+        return VerticalTypography.layout(item.verticalTokens, item.areaRect, item.sourceRect,
+                item.strips, item.stripBottoms, targetPreferred, allowShrink,
+                argb, width, height, item.hasSurface, item.backgroundColor);
     }
 
     private static void prepareHorizontalText(Item item, Input s, int areaH) {
@@ -615,12 +669,13 @@ final class SpatialLayoutPlanner {
 
         String text = s.translated.replace("\r\n", "\n").replace('\r', '\n');
         boolean explicitRows = rowsBreakExplicitly(item.detectedLines, item.sourceRect[2] - item.sourceRect[0]);
-        if (s.sourceLines.size() > 1 && !explicitRows && !hasSeparateTextLines(s.source)) {
+        boolean keepStructuredLines = explicitRows || hasSeparateTextLines(s.source) || hasKeyValueLines(s.source);
+        if (s.sourceLines.size() > 1 && !keepStructuredLines) {
             text = reflowSingleLineBreaks(text);
         } else if (item.allowedRows == 1) {
             text = reflowSingleLineBreaks(text);
         }
-        item.displayText = text.trim();
+        item.displayText = VerticalTypography.normalizeHorizontalPunctuation(text.trim());
 
         boolean hasProsePunct = hasAnyChar(item.displayText, PROSE_PUNCT) || hasAnyChar(s.source, PROSE_PUNCT);
         item.isProse = hasProsePunct || item.detectedLines.size() >= 2 || item.displayText.length() >= 14;
@@ -865,6 +920,14 @@ final class SpatialLayoutPlanner {
                             List<int[]> detectedLines, int surfaceRef, boolean reliableSurface,
                             boolean hasGlyphColor, int glyphColor, int grow, float detectedHeight,
                             boolean isColumn) {
+        return buildCover(argb, imgW, imgH, region, source, detectedLines, surfaceRef, reliableSurface,
+                hasGlyphColor, glyphColor, grow, grow, detectedHeight, isColumn);
+    }
+
+    static int[] buildCover(int[] argb, int imgW, int imgH, int[] region, int[] source,
+                            List<int[]> detectedLines, int surfaceRef, boolean reliableSurface,
+                            boolean hasGlyphColor, int glyphColor, int grow, int rightGrow, float detectedHeight,
+                            boolean isColumn) {
         int coverW = region[2] - region[0];
         int coverH = region[3] - region[1];
         if (coverW <= 0 || coverH <= 0) return new int[0];
@@ -967,7 +1030,7 @@ final class SpatialLayoutPlanner {
                 byte active = (departure > threshold || closerToGlyph) ? (byte) 1 : 0;
                 int pIdx = y * coverW + x;
                 rawInk[pIdx] = active;
-                if (active != 0 && insideDetectedLine(sx, sy, source, detectedLines, grow, isColumn)) {
+                if (active != 0 && insideDetectedLine(sx, sy, source, detectedLines, grow, rightGrow, isColumn)) {
                     glyphMask[pIdx] = 1;
                 }
             }
@@ -1186,13 +1249,14 @@ final class SpatialLayoutPlanner {
     }
 
     private static boolean insideDetectedLine(int sx, int sy, int[] source, List<int[]> detectedLines,
-                                              int grow, boolean isColumn) {
-        if (sx >= source[0] - grow && sx <= source[2] + grow
+                                              int grow, int rightGrow, boolean isColumn) {
+        if (sx >= source[0] - grow && sx <= source[2] + rightGrow
                 && sy >= source[1] - grow && sy <= source[3] + grow) return true;
         if (detectedLines.isEmpty()) return true;
         int hGrow = isColumn ? 2 : grow;
+        int rGrow = isColumn ? rightGrow : grow;
         for (int[] line : detectedLines) {
-            if (sx >= line[0] - hGrow && sx <= line[2] + hGrow
+            if (sx >= line[0] - hGrow && sx <= line[2] + rGrow
                     && sy >= line[1] - (grow + 2) && sy <= line[3] + (grow + 2)) return true;
         }
         return false;
@@ -1845,6 +1909,17 @@ final class SpatialLayoutPlanner {
             if (band > 0 && gap > band * .6f) wideGaps++;
         }
         return wideGaps * 2 > lines.size() - 1;
+    }
+
+    private static boolean hasKeyValueLines(String original) {
+        if (original == null) return false;
+        String[] parts = original.replace("\r\n", "\n").replace('\r', '\n').split("\n");
+        if (parts.length < 2 || parts.length > 4) return false;
+        for (String p : parts) {
+            String t = p.trim();
+            if (t.contains("：") || t.contains(":")) return true;
+        }
+        return false;
     }
 
     private static boolean hasSeparateTextLines(String original) {

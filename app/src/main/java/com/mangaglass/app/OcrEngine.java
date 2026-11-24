@@ -50,11 +50,20 @@ final class OcrEngine {
     static boolean shouldUseMangaEngine(List<int[]> boxes, String language, boolean mangaAvailable) {
         if (boxes == null || boxes.isEmpty() || !mangaAvailable) return false;
         if (!AUTO.equals(language) && !JAPANESE.equals(language)) return false;
+        int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE;
         int vertical = 0;
         for (int[] box : boxes) {
             int w = box[2] - box[0], h = box[3] - box[1];
-            if (w > 0 && h * 5 > w * 6) vertical++;
+            if (box[0] < minX) minX = box[0];
+            if (box[1] < minY) minY = box[1];
+            if (box[2] > maxX) maxX = box[2];
+            if (box[3] > maxY) maxY = box[3];
+            // Genuine vertical columns have meaningful height (>= 24px) rather than short horizontal tokens.
+            if (w > 0 && h >= 24 && h * 5 > w * 6) vertical++;
         }
+        // A single ultra-wide horizontal strip (e.g. one-line code comment screenshot) is never vertical manga.
+        int spanW = maxX - minX, spanH = maxY - minY;
+        if (boxes.size() >= 2 && spanH < 64 && spanW > spanH * 4) return false;
         double share = vertical / (double) boxes.size();
         if (JAPANESE.equals(language)) return share >= .30;
         if (vertical >= 2 && share >= .40) return true;
@@ -622,7 +631,7 @@ final class OcrEngine {
                         int[] box = boxes.get(items.get(pos + b)[0]);
                         CtcDecoder.Result result = CtcDecoder.decode(logits, b * sliceSize,
                                 steps, classes, model.alphabet);
-                        if (!result.text.trim().isEmpty()) {
+                        if (keepMangaLine(result.text, result.confidence)) {
                             lines.add(new OcrLine(box, result.text, result.confidence));
                         }
                     }
@@ -640,7 +649,7 @@ final class OcrEngine {
                             new long[]{1, 3, inputHeight, item[1]}, outputShape);
                     CtcDecoder.Result result = CtcDecoder.decode(logits, (int) outputShape[0][1],
                             (int) outputShape[0][2], model.alphabet);
-                    if (!result.text.trim().isEmpty()) {
+                    if (keepMangaLine(result.text, result.confidence)) {
                         lines.add(new OcrLine(box, result.text, result.confidence));
                     }
                 }
@@ -651,6 +660,16 @@ final class OcrEngine {
         for (OcrLine line : lines) if (line.height() > line.width()) vertical++;
         if (vertical * 2 > lines.size()) lines.sort(OcrGrouping.COLUMN_ORDER);
         return lines;
+    }
+
+    static boolean keepMangaLine(String text, float confidence) {
+        if (text == null) return false;
+        String trimmed = text.trim();
+        if (trimmed.isEmpty()) return false;
+        if (confidence < .60f) return false;
+        // Single-glyph artwork/speedline/furigana detections need stronger confidence to survive.
+        if (trimmed.codePointCount(0, trimmed.length()) == 1 && confidence < .78f) return false;
+        return true;
     }
 
     private static float quality(OcrLine line) {

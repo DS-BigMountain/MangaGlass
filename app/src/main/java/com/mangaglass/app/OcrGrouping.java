@@ -171,10 +171,51 @@ final class OcrGrouping {
         boolean columnPage = isColumnPage(lines);
         lines.sort(columnPage ? COLUMN_ORDER : ROW_ORDER);
         List<OcrRegion> regions = groupParagraphs(lines, pixels, width, height, columnPage);
-        if (columnPage) joinStrips(regions, pixels, width, height);
+        if (columnPage || hasMultipleVerticalStrips(regions)) {
+            absorbFuriganaStrips(regions);
+            joinStrips(regions, pixels, width, height);
+        }
         markVerticalRegions(regions, columnPage);
         for (int i = 0; i < regions.size(); i++) regions.get(i).id = i + 1;
         return regions;
+    }
+
+    private static boolean hasMultipleVerticalStrips(List<OcrRegion> regions) {
+        int count = 0;
+        for (OcrRegion r : regions) if (isStrip(r) && ++count >= 2) return true;
+        return false;
+    }
+
+    /**
+     * Suppresses tiny ruby/furigana vertical strips hugging the right edge of a much wider main
+     * manga column so ruby annotations never split a bubble or produce garbled stray regions.
+     */
+    private static void absorbFuriganaStrips(List<OcrRegion> regions) {
+        if (regions.size() < 2) return;
+        boolean[] drop = new boolean[regions.size()];
+        for (int i = 0; i < regions.size(); i++) {
+            OcrRegion ruby = regions.get(i);
+            if (ruby.lines.size() != 1) continue;
+            int rw = ruby.width(), rh = ruby.height();
+            if (rw <= 0 || rh <= 0) continue;
+            for (int j = 0; j < regions.size(); j++) {
+                if (i == j || drop[j]) continue;
+                OcrRegion main = regions.get(j);
+                if (!isStrip(main)) continue;
+                int mw = medianLineWidth(main);
+                if (rw > mw * .52f || rh > main.height() * .85f) continue;
+                int gap = Math.max(ruby.left() - main.right(), main.left() - ruby.right());
+                if (gap < -rw || gap > Math.max(6, Math.round(mw * .45f))) continue;
+                int vOverlap = Math.min(ruby.bottom(), main.bottom()) - Math.max(ruby.top(), main.top());
+                if (vOverlap * 100L >= rh * 60L) {
+                    drop[i] = true;
+                    break;
+                }
+            }
+        }
+        for (int i = regions.size() - 1; i >= 0; i--) {
+            if (drop[i]) regions.remove(i);
+        }
     }
 
     /** A page whose vertical boxes make up the majority reads right to left. */
@@ -231,7 +272,21 @@ final class OcrGrouping {
                 float h = Math.max(1f, region.lineHeight);
                 int overlap = Math.min(last[2], line.right()) - Math.max(last[0], line.left());
                 boolean sentenceEnded = endsSentence(region.text);
-                float maxGap = columnPage ? h * .9f : h * .55f;
+                boolean verticalStrip = (last[3] - last[1]) * 5 > (last[2] - last[0]) * 6
+                        && line.height() * 5 > line.width() * 6;
+                float maxGap;
+                if (verticalStrip) {
+                    // For vertical manga columns, glyph size is the column width (not full column length).
+                    // Restricting vertical stacking to ~0.75 * colWidth stops separate stacked bubbles from merging.
+                    float charSize = Math.max(1f, Math.min(last[2] - last[0], line.width()));
+                    maxGap = charSize * .75f;
+                } else if (columnPage) {
+                    maxGap = h * .9f;
+                } else {
+                    boolean alignedLeft = Math.abs(line.left() - last[0]) <= Math.max(10f, h * 1.15f);
+                    // Allow relaxed CSS article line-height (up to 0.92 * h) when continuing an unfinished line.
+                    maxGap = (!sentenceEnded && alignedLeft) ? h * .92f : h * .55f;
+                }
                 float minRatio = columnPage ? .65f : (sentenceEnded ? .80f : .55f);
                 float maxRatio = columnPage ? 1.45f : 1.24f;
                 if (gap < -h * .25f || gap > maxGap || gap >= bestGap
@@ -259,15 +314,19 @@ final class OcrGrouping {
                                 || (region.lines.size() >= 2 && last[0] - line.left() > h * 1.1f))))
                         continue;
                     int lastW = last[2] - last[0];
+                    boolean tightLeftAligned = Math.abs(line.left() - last[0]) <= Math.max(8f, h * .65f)
+                            && gap <= h * .55f;
                     if (line.width() > h * 4 && lastW < line.width() * .72f
-                            && (!centerAligned || sentenceEnded || gap > h * .45f))
+                            && (!centerAligned || sentenceEnded || gap > h * .45f)
+                            && !(tightLeftAligned && !sentenceEnded && lastW >= h * 4f))
                         continue;
                     if (region.lines.size() >= 2 && !centerAligned
                             && (rtlRegion ? (last[0] > region.left() + (int) (h * 1.2f))
-                                          : (last[2] < region.right() - (int) (h * 1.2f))))
+                                          : (last[2] < region.right() - (int) (h * 1.2f)))
+                            && !(tightLeftAligned && !sentenceEnded && lastW >= region.width() * .55f))
                         continue;
                     if (sentenceEnded
-                            && (lineStartsList || gap > h * .30f || line.height() < h * .86f
+                            && (lineStartsList || gap > h * .38f || line.height() < h * .86f
                                 || lastW < Math.max(region.width(), line.width()) * .88f))
                         continue;
                     if (lastW < h * 5.5f && line.width() < h * 5.5f && gap > h * .32f)
@@ -332,6 +391,7 @@ final class OcrGrouping {
                 boolean tailJ = strip[j] || isColumnTail(regions.get(j), colWidth[i]);
                 if (!tailJ) continue;
                 int wJ = strip[j] ? colWidth[j] : regions.get(j).width();
+                if (hasInterveningStrip(regions, i, j)) continue;
                 if (canJoinStrips(regions.get(i), colWidth[i], regions.get(j), wJ,
                         apps[i], apps[j], pixels, width, height)) {
                     int rootA = findRoot(parent, i), rootB = findRoot(parent, j);
@@ -379,6 +439,25 @@ final class OcrGrouping {
         return w >= stripW * .55f && w <= stripW * 1.45f && h * 2 >= w && h <= stripW * 2.5f;
     }
 
+    /** Prevents strip A from leaping over an intervening strip K to join strip B, which would interleave boxes. */
+    private static boolean hasInterveningStrip(List<OcrRegion> regions, int i, int j) {
+        OcrRegion a = regions.get(i), b = regions.get(j);
+        OcrRegion right = (a.left() + a.right()) >= (b.left() + b.right()) ? a : b;
+        OcrRegion left = right == a ? b : a;
+        if (right.left() <= left.right()) return false;
+        int minT = Math.min(left.top(), right.top());
+        int maxB = Math.max(left.bottom(), right.bottom());
+        for (int k = 0; k < regions.size(); k++) {
+            if (k == i || k == j) continue;
+            OcrRegion mid = regions.get(k);
+            int cx = (mid.left() + mid.right()) / 2;
+            if (cx <= left.right() || cx >= right.left()) continue;
+            int vOv = Math.min(mid.bottom(), maxB) - Math.max(mid.top(), minT);
+            if (vOv * 100L >= mid.height() * 35L) return true;
+        }
+        return false;
+    }
+
     private static boolean canJoinStrips(OcrRegion a, int widthA, OcrRegion b, int widthB,
                                          LineAppearance appA, LineAppearance appB,
                                          Pixels pixels, int width, int height) {
@@ -389,14 +468,24 @@ final class OcrGrouping {
         int maxCol = Math.max(widthA, widthB);
         if (maxCol > minCol * 2.4f) return false;
         int spacing = right.left() - left.right();
-        if (spacing < -minCol * .5f || spacing > minCol * 1.85f) return false;
+        if (spacing < -minCol * .5f || spacing > minCol * 1.45f) return false;
         int overlap = Math.min(right.bottom(), left.bottom()) - Math.max(right.top(), left.top());
         int minH = Math.min(right.height(), left.height());
         if (overlap <= 0 || overlap * 100L <= minH * 45L) return false;
         float centerYA = (right.top() + right.bottom()) / 2f;
         float centerYB = (left.top() + left.bottom()) / 2f;
         if (Math.abs(centerYA - centerYB) > Math.max(right.height(), left.height()) * .55f) return false;
-        if (!appearanceMatches(appA, appB)) return false;
+        // Tight adjacent manga columns on outlined/gradient panels tolerate slightly wider tone shift.
+        boolean tightGap = spacing <= minCol * .55f;
+        if (tightGap) {
+            if (appA.hasInk && appB.hasInk) {
+                int bgDiff = Math.abs(appA.bgR - appB.bgR) + Math.abs(appA.bgG - appB.bgG) + Math.abs(appA.bgB - appB.bgB);
+                int inkDiff = Math.abs(appA.inkR - appB.inkR) + Math.abs(appA.inkG - appB.inkG) + Math.abs(appA.inkB - appB.inkB);
+                if (bgDiff > 90 || inkDiff > 110) return false;
+            }
+        } else if (!appearanceMatches(appA, appB)) {
+            return false;
+        }
         return !hasVerticalStripBarrier(pixels, width, height, right.rect, left.rect);
     }
 
@@ -419,8 +508,8 @@ final class OcrGrouping {
         for (OcrRegion region : regions) {
             if (isStrip(region)) {
                 region.vertical = true;
-            } else if (columnPage && region.lines.size() == 1
-                    && region.height() >= region.width() && hasCjk(region.text)) {
+            } else if (columnPage && hasCjk(region.text)
+                    && !(region.lines.size() == 1 && region.width() > region.height() * 1.65f)) {
                 region.vertical = true;
             } else {
                 region.vertical = false;
@@ -444,9 +533,6 @@ final class OcrGrouping {
     /** Detects a continuous panel border, bubble outline, or background jump between two adjacent strips. */
     private static boolean hasVerticalStripBarrier(Pixels pixels, int width, int height, int[] rightBox, int[] leftBox) {
         if (pixels == null || width <= 0 || height <= 0) return false;
-        int x0 = Math.max(0, Math.min(leftBox[2], rightBox[0]) - 2);
-        int x1 = Math.min(width, Math.max(leftBox[2], rightBox[0]) + 2);
-        if (x1 <= x0) return false;
         int y0 = Math.max(0, Math.max(leftBox[1], rightBox[1]));
         int y1 = Math.min(height, Math.min(leftBox[3], rightBox[3]));
         int overlapH = y1 - y0;
@@ -458,6 +544,13 @@ final class OcrGrouping {
                 + Math.abs(bgRight[2] - bgLeft[2]) > 150) {
             return true;
         }
+        // Strictly scan the interior gap between leftBox and rightBox; never step into glyph strokes.
+        int gap = rightBox[0] - leftBox[2];
+        if (gap <= 3) return false;
+        int x0 = Math.max(0, leftBox[2] + 1);
+        int x1 = Math.min(width, rightBox[0] - 1);
+        if (x1 <= x0) return false;
+
         int bgR = (bgRight[0] + bgLeft[0]) / 2;
         int bgG = (bgRight[1] + bgLeft[1]) / 2;
         int bgB = (bgRight[2] + bgLeft[2]) / 2;
@@ -479,7 +572,7 @@ final class OcrGrouping {
                     rowHit = true;
                     colHits[c]++;
                     int bestPrev = 0;
-                    for (int dc = -2; dc <= 2; dc++) {
+                    for (int dc = -4; dc <= 4; dc++) {
                         int pc = c + dc;
                         if (pc >= 0 && pc < span) bestPrev = Math.max(bestPrev, prevRun[pc]);
                     }
@@ -494,8 +587,8 @@ final class OcrGrouping {
             prevRun = currRun;
             currRun = swap;
         }
-        if (maxRun >= Math.max(14, Math.round(overlapH * .55f))) return true;
-        if (rowsWithBarrier >= overlapH * .80f && maxRun >= Math.max(12, Math.round(overlapH * .38f))) return true;
+        if (maxRun >= Math.max(14, Math.round(overlapH * .50f))) return true;
+        if (rowsWithBarrier >= overlapH * .75f && maxRun >= Math.max(12, Math.round(overlapH * .35f))) return true;
 
         int extPad = Math.max(8, Math.min(24, overlapH / 4));
         int extY0 = Math.max(0, y0 - extPad);
@@ -514,19 +607,55 @@ final class OcrGrouping {
                 if (topHits >= topLen * .60f && botHits >= botLen * .60f) return true;
             }
         }
+        // Detect hourglass / peanut-bubble pinch waist when two lobes sit farther apart than normal column spacing
+        // (> 0.65 * colW) and dark bubble-outline notches protrude into the gap from above and/or below.
+        int minCol = Math.max(1, Math.min(leftBox[2] - leftBox[0], rightBox[2] - rightBox[0]));
+        if (gap > minCol * .65f && span >= 12) {
+            int notchDepth = Math.max(18, Math.min(80, overlapH / 2));
+            int topScan0 = Math.max(0, y0 - notchDepth);
+            int botScan1 = Math.min(height, y1 + notchDepth);
+            int cx0 = x0 + span / 5;
+            int cx1 = Math.max(cx0 + 1, x1 - span / 5);
+            int topNotchRows = 0, botNotchRows = 0;
+            for (int y = topScan0; y < Math.min(height, y0 + Math.min(36, overlapH / 4)); y++) {
+                if (rowHasDarkNotch(pixels, cx0, cx1, y, bgR, bgG, bgB)) topNotchRows++;
+            }
+            for (int y = Math.max(0, y1 - Math.min(36, overlapH / 4)); y < botScan1; y++) {
+                if (rowHasDarkNotch(pixels, cx0, cx1, y, bgR, bgG, bgB)) botNotchRows++;
+            }
+            if ((topNotchRows >= 6 && botNotchRows >= 6) || topNotchRows >= 18 || botNotchRows >= 18) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean rowHasDarkNotch(Pixels pixels, int x0, int x1, int y, int bgR, int bgG, int bgB) {
+        int dark = 0;
+        for (int x = x0; x < x1; x++) {
+            int color = pixels.at(x, y);
+            int delta = Math.abs(((color >> 16) & 255) - bgR)
+                    + Math.abs(((color >> 8) & 255) - bgG)
+                    + Math.abs((color & 255) - bgB);
+            if (delta > 120) {
+                if (++dark >= 2) return true;
+            }
+        }
         return false;
     }
 
     /** Detects a vertical UI divider or column border between two horizontal neighbours. */
     private static boolean hasVerticalDivider(Pixels pixels, int width, int height, int[] leftRect, int[] rightRect) {
         if (pixels == null || width <= 2 || height <= 2) return false;
+        // Touching boxes have no room for a UI divider; never step into glyph stems.
+        if (rightRect[0] - leftRect[2] < 3) return false;
         int top = Math.max(0, Math.max(leftRect[1], rightRect[1]) - 2);
         int bottom = Math.min(height, Math.min(leftRect[3], rightRect[3]) + 2);
         int span = bottom - top;
         if (span < 8) return false;
-        int startX = Math.max(1, Math.min(leftRect[2], rightRect[0]) - 4);
-        int endX = Math.min(width - 2, Math.max(leftRect[2], rightRect[0]) + 4);
-        if (endX <= startX) return false;
+        int startX = Math.max(1, leftRect[2] + 1);
+        int endX = Math.min(width - 2, rightRect[0] - 1);
+        if (endX < startX) return false;
         for (int x = startX; x <= endX; x++) {
             int edges = 0;
             int minR = 255, maxR = 0, minG = 255, maxG = 0, minB = 255, maxB = 0;
@@ -542,8 +671,8 @@ final class OcrGrouping {
                 if (g < minG) minG = g; if (g > maxG) maxG = g;
                 if (b < minB) minB = b; if (b > maxB) maxB = b;
             }
-            boolean verticalEdge = edges > span * .55;
-            boolean uniformStroke = (maxR - minR) + (maxG - minG) + (maxB - minB) <= 36 && edges > span * .35;
+            boolean verticalEdge = edges > span * .65;
+            boolean uniformStroke = (maxR - minR) + (maxG - minG) + (maxB - minB) <= 36 && edges > span * .45;
             if (verticalEdge || uniformStroke) return true;
         }
         return false;

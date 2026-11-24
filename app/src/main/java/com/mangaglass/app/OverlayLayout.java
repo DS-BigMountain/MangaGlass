@@ -52,12 +52,12 @@ final class OverlayLayout {
         final boolean bold;
         final boolean coverOnly;
         final StaticLayout textLayout;
-        final List<ColumnStrip> columnStrips;
+        final VerticalTypography.Layout verticalLayout;
 
         Label(Rect bounds, Rect source, Rect coverRect, Bitmap coverBitmap, String fullText,
               float fontSize, float linePitch, float drawX, float drawY, RectF clipRect,
               int textColor, int rimColor, boolean drawRim, boolean bold, boolean coverOnly,
-              StaticLayout textLayout, List<ColumnStrip> columnStrips) {
+              StaticLayout textLayout, VerticalTypography.Layout verticalLayout) {
             this.bounds = new Rect(bounds);
             this.source = new Rect(source);
             this.coverRect = coverRect == null ? null : new Rect(coverRect);
@@ -74,7 +74,7 @@ final class OverlayLayout {
             this.bold = bold;
             this.coverOnly = coverOnly;
             this.textLayout = textLayout;
-            this.columnStrips = columnStrips;
+            this.verticalLayout = verticalLayout;
         }
 
         String fullText() { return fullText; }
@@ -85,8 +85,8 @@ final class OverlayLayout {
 
         void drawText(Canvas canvas) {
             if (coverOnly) return;
-            if (columnStrips != null && !columnStrips.isEmpty()) {
-                drawVerticalStrips(canvas);
+            if (verticalLayout != null && !verticalLayout.columns.isEmpty()) {
+                drawVerticalLayout(canvas);
                 return;
             }
             if (textLayout == null) return;
@@ -116,41 +116,99 @@ final class OverlayLayout {
             canvas.restore();
         }
 
-        private void drawVerticalStrips(Canvas canvas) {
-            TextPaint tp = createPaint(fontSize, textColor, bold);
+        private void drawVerticalLayout(Canvas canvas) {
+            float sz = verticalLayout.fontSize;
+            float pitch = verticalLayout.rowPitch;
+            TextPaint tp = createPaint(sz, textColor, bold);
             Paint.FontMetrics fm = tp.getFontMetrics();
-            float rimW = Math.max(1.4f, fontSize * .135f);
-            float weightW = Math.max(.45f, fontSize * .032f);
+            Rect glyphBounds = new Rect();
+            float rimW = Math.max(1.4f, sz * .135f);
+            float weightW = Math.max(.45f, sz * .032f);
             canvas.save();
             if (clipRect != null) canvas.clipRect(clipRect);
-            for (ColumnStrip strip : columnStrips) {
-                float centerX = (strip.rect.left + strip.rect.right) * .5f;
-                for (int r = 0; r < strip.glyphs.length; r++) {
-                    String g = strip.glyphs[r];
-                    float gw = tp.measureText(g);
-                    float x = centerX - gw * .5f;
-                    float cellTop = strip.rect.top + r * linePitch;
-                    float baseline = cellTop + linePitch * .5f - (fm.ascent + fm.descent) * .5f;
-                    if (drawRim) {
-                        tp.setStyle(Paint.Style.STROKE);
-                        tp.setStrokeJoin(Paint.Join.ROUND);
-                        tp.setStrokeCap(Paint.Cap.ROUND);
-                        tp.setStrokeWidth(rimW);
-                        tp.setColor(rimColor);
-                        canvas.drawText(g, x, baseline, tp);
+            for (VerticalTypography.Column col : verticalLayout.columns) {
+                float cx = col.centerX;
+                for (int r = 0; r < col.tokens.size(); r++) {
+                    VerticalTypography.Token tok = col.tokens.get(r);
+                    float cellTop = col.topY + r * pitch;
+                    float cellCy = cellTop + pitch * .5f;
+                    switch (tok.mode) {
+                        case ROTATE_90: {
+                            // Center the glyph's actual ink bounding box on (cx, cellCy) before 90-deg CW rotation
+                            // so ellipses ("…") and dashes ("—") align dead-center along the column axis.
+                            tp.getTextBounds(tok.text, 0, tok.text.length(), glyphBounds);
+                            float gx, baseline;
+                            if (!glyphBounds.isEmpty()) {
+                                gx = cx - glyphBounds.exactCenterX();
+                                baseline = cellCy - glyphBounds.exactCenterY();
+                            } else {
+                                float gw = tp.measureText(tok.text);
+                                gx = cx - gw * .5f;
+                                baseline = cellCy - (fm.ascent + fm.descent) * .5f;
+                            }
+                            canvas.save();
+                            canvas.rotate(90f, cx, cellCy);
+                            drawGlyphPasses(canvas, tok.text, gx, baseline, tp, rimW, weightW);
+                            canvas.restore();
+                            break;
+                        }
+                        case CORNER_PUNCT: {
+                            float gw = tp.measureText(tok.text);
+                            // Optical upper-right placement matching vertical CJK typography for 。、，．
+                            float gx = cx - gw * .5f + sz * .26f;
+                            float baseline = cellCy - (fm.ascent + fm.descent) * .5f - sz * .26f;
+                            drawGlyphPasses(canvas, tok.text, gx, baseline, tp, rimW, weightW);
+                            break;
+                        }
+                        case TATE_CHU_YOKO: {
+                            float rawW = tp.measureText(tok.text);
+                            float targetW = sz * .98f;
+                            float scaleX = rawW > targetW ? (targetW / rawW) : 1f;
+                            float subSize = tok.text.length() >= 3 ? sz * .74f : sz * .86f;
+                            tp.setTextSize(subSize);
+                            tp.setTextScaleX(scaleX);
+                            Paint.FontMetrics sfm = tp.getFontMetrics();
+                            float gw = tp.measureText(tok.text);
+                            float gx = cx - gw * .5f;
+                            float baseline = cellCy - (sfm.ascent + sfm.descent) * .5f;
+                            drawGlyphPasses(canvas, tok.text, gx, baseline, tp,
+                                    Math.max(1.2f, subSize * .135f), Math.max(.4f, subSize * .032f));
+                            tp.setTextScaleX(1f);
+                            tp.setTextSize(sz);
+                            break;
+                        }
+                        default: {
+                            float gw = tp.measureText(tok.text);
+                            float gx = cx - gw * .5f;
+                            float baseline = cellCy - (fm.ascent + fm.descent) * .5f;
+                            drawGlyphPasses(canvas, tok.text, gx, baseline, tp, rimW, weightW);
+                            break;
+                        }
                     }
-                    tp.setStyle(Paint.Style.STROKE);
-                    tp.setStrokeJoin(Paint.Join.ROUND);
-                    tp.setStrokeCap(Paint.Cap.ROUND);
-                    tp.setStrokeWidth(weightW);
-                    tp.setColor(textColor);
-                    canvas.drawText(g, x, baseline, tp);
-                    tp.setStyle(Paint.Style.FILL);
-                    tp.setColor(textColor);
-                    canvas.drawText(g, x, baseline, tp);
                 }
             }
             canvas.restore();
+        }
+
+        private void drawGlyphPasses(Canvas canvas, String g, float x, float baseline,
+                                     TextPaint tp, float rimW, float weightW) {
+            if (drawRim) {
+                tp.setStyle(Paint.Style.STROKE);
+                tp.setStrokeJoin(Paint.Join.ROUND);
+                tp.setStrokeCap(Paint.Cap.ROUND);
+                tp.setStrokeWidth(rimW);
+                tp.setColor(rimColor);
+                canvas.drawText(g, x, baseline, tp);
+            }
+            tp.setStyle(Paint.Style.STROKE);
+            tp.setStrokeJoin(Paint.Join.ROUND);
+            tp.setStrokeCap(Paint.Cap.ROUND);
+            tp.setStrokeWidth(weightW);
+            tp.setColor(textColor);
+            canvas.drawText(g, x, baseline, tp);
+            tp.setStyle(Paint.Style.FILL);
+            tp.setColor(textColor);
+            canvas.drawText(g, x, baseline, tp);
         }
     }
 
@@ -158,7 +216,7 @@ final class OverlayLayout {
         float fontSize;
         float linePitch;
         StaticLayout layout;
-        List<ColumnStrip> strips;
+        VerticalTypography.Layout verticalLayout;
         boolean centerAligned;
         boolean wrap;
     }
@@ -205,7 +263,7 @@ final class OverlayLayout {
             if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
             SpatialLayoutPlanner.Item item = items.get(i);
             if (item.suppressed || item.coverOnly) continue;
-            fitted[i] = fitItem(item, item.harmonizedFontSize, true, scale);
+            fitted[i] = fitItem(item, item.harmonizedFontSize, true, scale, data, width, height);
             fittedSizes[i] = fitted[i].fontSize;
         }
 
@@ -215,9 +273,12 @@ final class OverlayLayout {
             SpatialLayoutPlanner.Item item = items.get(i);
             if (item.suppressed || item.coverOnly || fitted[i] == null) continue;
             if (finalSizes[i] < fittedSizes[i] - .25f) {
-                fitted[i] = fitItem(item, finalSizes[i], false, scale);
+                fitted[i] = fitItem(item, finalSizes[i], false, scale, data, width, height);
             }
         }
+
+        // Pass C: resolve any remaining drawn overhang collisions between adjacent labels.
+        resolveDrawnOverlaps(items, fitted, scale, data, width, height);
 
         for (int i = 0; i < n; i++) {
             SpatialLayoutPlanner.Item item = items.get(i);
@@ -242,22 +303,32 @@ final class OverlayLayout {
                 continue;
             }
             Fitted f = fitted[i];
-            if (f == null || (f.layout == null && (f.strips == null || f.strips.isEmpty()))) {
+            if (f == null || (f.layout == null && (f.verticalLayout == null || f.verticalLayout.columns.isEmpty()))) {
                 if (coverBitmap != null) coverBitmap.recycle();
                 continue;
             }
             float pad = item.padding;
-            float clipLeft = f.centerAligned
-                    ? area.left + pad - item.maxOverhang * .5f
-                    : area.left + pad;
-            float clipRight = f.centerAligned
-                    ? area.right - pad + item.maxOverhang * .5f
-                    : area.right - pad + item.maxOverhang;
-            RectF clipRect = new RectF(
-                    Math.max(0f, clipLeft),
-                    Math.max(0f, area.top - 2f),
-                    Math.min(width, clipRight),
-                    Math.min(height, area.bottom + 2f));
+            RectF clipRect;
+            if (f.verticalLayout != null) {
+                float rimPad = Math.max(2f, f.fontSize * .20f);
+                clipRect = new RectF(
+                        Math.max(0f, Math.min(area.left, f.verticalLayout.contentLeft) - rimPad),
+                        Math.max(0f, Math.min(area.top, f.verticalLayout.contentTop) - rimPad),
+                        Math.min(width, Math.max(area.right, f.verticalLayout.contentRight) + rimPad),
+                        Math.min(height, Math.max(area.bottom, f.verticalLayout.contentBottom) + rimPad));
+            } else {
+                float clipLeft = f.centerAligned
+                        ? area.left + pad - item.maxOverhang * .5f
+                        : area.left + pad;
+                float clipRight = f.centerAligned
+                        ? area.right - pad + item.maxOverhang * .5f
+                        : area.right - pad + item.maxOverhang;
+                clipRect = new RectF(
+                        Math.max(0f, clipLeft - 2f),
+                        Math.max(0f, area.top - 2f),
+                        Math.min(width, clipRight + 2f),
+                        Math.min(height, area.bottom + 2f));
+            }
 
             float drawX = area.left + pad;
             float drawY = area.top + pad;
@@ -270,44 +341,98 @@ final class OverlayLayout {
             result.labels.add(new Label(area, source, coverRect, coverBitmap, item.displayText,
                     f.fontSize, f.linePitch, drawX, drawY, clipRect,
                     item.textColor, item.rimColor, item.drawRim, item.bold, false,
-                    f.layout, f.strips));
+                    f.layout, f.verticalLayout));
         }
         return result;
     }
 
+    private static void resolveDrawnOverlaps(List<SpatialLayoutPlanner.Item> items, Fitted[] fitted,
+                                             float scale, int[] argb, int width, int height) {
+        int n = items.size();
+        for (int pass = 0; pass < 2; pass++) {
+            boolean changed = false;
+            float[][] drawn = new float[n][];
+            for (int i = 0; i < n; i++) {
+                SpatialLayoutPlanner.Item it = items.get(i);
+                Fitted f = fitted[i];
+                if (it.suppressed || it.coverOnly || f == null) continue;
+                drawn[i] = computeDrawnRect(it, f);
+            }
+            for (int i = 0; i < n; i++) {
+                if (drawn[i] == null) continue;
+                for (int j = i + 1; j < n; j++) {
+                    if (drawn[j] == null) continue;
+                    float ix0 = Math.max(drawn[i][0], drawn[j][0]);
+                    float iy0 = Math.max(drawn[i][1], drawn[j][1]);
+                    float ix1 = Math.min(drawn[i][2], drawn[j][2]);
+                    float iy1 = Math.min(drawn[i][3], drawn[j][3]);
+                    if (ix1 - ix0 <= 2f || iy1 - iy0 <= 2f) continue;
+                    // Separate along the shallower penetration axis at midpoint of source boxes.
+                    SpatialLayoutPlanner.Item a = items.get(i), b = items.get(j);
+                    if ((ix1 - ix0) <= (iy1 - iy0)) {
+                        SpatialLayoutPlanner.Item left = a.sourceRect[0] <= b.sourceRect[0] ? a : b;
+                        SpatialLayoutPlanner.Item right = left == a ? b : a;
+                        int li = left.index, ri = right.index;
+                        int mid = (left.sourceRect[2] + right.sourceRect[0]) / 2;
+                        if (mid > left.areaRect[0] + 4 && mid < right.areaRect[2] - 4) {
+                            left.areaRect[2] = Math.min(left.areaRect[2], mid - 1);
+                            left.maxOverhang = 0f;
+                            left.availableWidth = Math.max(4f, left.areaRect[2] - left.areaRect[0] - 2 * left.padding);
+                            right.areaRect[0] = Math.max(right.areaRect[0], mid + 1);
+                            if (right.centerAligned) right.maxOverhang = 0f;
+                            right.availableWidth = Math.max(4f, right.areaRect[2] - right.areaRect[0] - 2 * right.padding);
+                            fitted[li] = fitItem(left, fitted[li].fontSize, true, scale, argb, width, height);
+                            fitted[ri] = fitItem(right, fitted[ri].fontSize, true, scale, argb, width, height);
+                            changed = true;
+                        }
+                    } else {
+                        SpatialLayoutPlanner.Item top = a.sourceRect[1] <= b.sourceRect[1] ? a : b;
+                        SpatialLayoutPlanner.Item bot = top == a ? b : a;
+                        int ti = top.index, bi = bot.index;
+                        int mid = (top.sourceRect[3] + bot.sourceRect[1]) / 2;
+                        if (mid > top.areaRect[1] + 4 && mid < bot.areaRect[3] - 4) {
+                            top.areaRect[3] = Math.min(top.areaRect[3], mid - 1);
+                            top.availableHeight = Math.max(4f, top.areaRect[3] - top.areaRect[1] - 2 * top.padding);
+                            bot.areaRect[1] = Math.max(bot.areaRect[1], mid + 1);
+                            bot.availableHeight = Math.max(4f, bot.areaRect[3] - bot.areaRect[1] - 2 * bot.padding);
+                            fitted[ti] = fitItem(top, fitted[ti].fontSize, true, scale, argb, width, height);
+                            fitted[bi] = fitItem(bot, fitted[bi].fontSize, true, scale, argb, width, height);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if (!changed) break;
+        }
+    }
+
+    private static float[] computeDrawnRect(SpatialLayoutPlanner.Item it, Fitted f) {
+        if (f.verticalLayout != null) {
+            return new float[]{
+                    f.verticalLayout.contentLeft, f.verticalLayout.contentTop,
+                    f.verticalLayout.contentRight, f.verticalLayout.contentBottom
+            };
+        }
+        if (f.layout == null) return null;
+        Rect area = new Rect(it.areaRect[0], it.areaRect[1], it.areaRect[2], it.areaRect[3]);
+        float pad = it.padding;
+        float widest = 0f;
+        for (int l = 0; l < f.layout.getLineCount(); l++) widest = Math.max(widest, f.layout.getLineMax(l));
+        float x0 = f.centerAligned ? (area.left + pad + (it.availableWidth - widest) * .5f) : (area.left + pad);
+        float y0 = verticalAlignY(it, area, pad, f.layout, f.fontSize, f.linePitch);
+        return new float[]{x0, y0, x0 + widest, y0 + f.layout.getHeight()};
+    }
+
     private static Fitted fitItem(SpatialLayoutPlanner.Item item, float targetPreferred,
-                                  boolean allowShrink, float scale) {
+                                  boolean allowShrink, float scale, int[] argb, int imgW, int imgH) {
         Fitted out = new Fitted();
         out.centerAligned = item.centerAligned;
         if (item.column) {
-            float size = targetPreferred;
-            if (allowShrink && item.glyphs.length > 0 && verticalCapacity(item, size) < item.glyphs.length) {
-                float low = 8f, high = size;
-                for (int step = 0; step < 14; step++) {
-                    float mid = (low + high) * .5f;
-                    if (verticalCapacity(item, mid) >= item.glyphs.length) low = mid;
-                    else high = mid;
-                }
-                size = low;
-            }
-            out.fontSize = size;
-            out.linePitch = Math.max(1f, size * 1.12f);
-            List<ColumnStrip> strips = new ArrayList<>(item.strips.size());
-            int at = 0;
-            for (int k = 0; k < item.strips.size() && at < item.glyphs.length; k++) {
-                int[] st = item.strips.get(k);
-                int count = stripRoom(item, out.linePitch, k);
-                // Put any remaining glyphs into the final strip rather than dropping text.
-                int take = (k + 1 == item.strips.size())
-                        ? (item.glyphs.length - at)
-                        : Math.min(count, item.glyphs.length - at);
-                if (take <= 0) continue;
-                String[] colGlyphs = new String[take];
-                System.arraycopy(item.glyphs, at, colGlyphs, 0, take);
-                at += take;
-                strips.add(new ColumnStrip(new Rect(st[0], st[1], st[2], item.stripBottoms[k]), colGlyphs));
-            }
-            out.strips = strips;
+            VerticalTypography.Layout vl = SpatialLayoutPlanner.buildVerticalLayout(
+                    item, targetPreferred, allowShrink, argb, imgW, imgH);
+            out.fontSize = vl.fontSize;
+            out.linePitch = vl.rowPitch;
+            out.verticalLayout = vl;
             return out;
         }
 
@@ -326,10 +451,11 @@ final class OverlayLayout {
                 }
             }
             if (!fitsHorizontal(layout, item, size, maxRows)) {
-                float low = Math.min(targetPreferred, Math.max(10f * Math.max(1f, scale * .5f), targetPreferred * .58f));
+                // Allow shrinking cleanly down to a safe readable floor so text is never clipped.
+                float low = Math.min(targetPreferred, Math.max(7f, targetPreferred * .35f));
                 float high = targetPreferred;
                 StaticLayout best = buildHorizontalLayout(item, low, wrap);
-                for (int step = 0; step < 12; step++) {
+                for (int step = 0; step < 14; step++) {
                     float mid = (low + high) * .5f;
                     StaticLayout trial = buildHorizontalLayout(item, mid, wrap);
                     if (fitsHorizontal(trial, item, mid, maxRows)) {
@@ -337,6 +463,26 @@ final class OverlayLayout {
                         best = trial;
                     } else {
                         high = mid;
+                    }
+                }
+                // If wrapping with one extra row allows a larger readable size while still fitting height, prefer it.
+                if (wrap && maxRows > 0 && !fitsHorizontal(best, item, low, maxRows)) {
+                    int relaxedRows = maxRows + 2;
+                    float rLow = low, rHigh = targetPreferred;
+                    StaticLayout rBest = buildHorizontalLayout(item, rLow, true);
+                    for (int step = 0; step < 12; step++) {
+                        float mid = (rLow + rHigh) * .5f;
+                        StaticLayout trial = buildHorizontalLayout(item, mid, true);
+                        if (fitsHorizontal(trial, item, mid, relaxedRows)) {
+                            rLow = mid;
+                            rBest = trial;
+                        } else {
+                            rHigh = mid;
+                        }
+                    }
+                    if (fitsHorizontal(rBest, item, rLow, relaxedRows)) {
+                        low = rLow;
+                        best = rBest;
                     }
                 }
                 size = low;
@@ -350,18 +496,6 @@ final class OverlayLayout {
         return out;
     }
 
-    private static int stripRoom(SpatialLayoutPlanner.Item item, float pitch, int k) {
-        int h = item.stripBottoms[k] - item.strips.get(k)[1];
-        return Math.max(1, (int) Math.floor(h / Math.max(1f, pitch)));
-    }
-
-    private static int verticalCapacity(SpatialLayoutPlanner.Item item, float size) {
-        float pitch = Math.max(1f, size * 1.12f);
-        int total = 0;
-        for (int k = 0; k < item.strips.size(); k++) total += stripRoom(item, pitch, k);
-        return total;
-    }
-
     @android.annotation.SuppressLint("InlinedApi")
     private static StaticLayout buildHorizontalLayout(SpatialLayoutPlanner.Item item, float fontSize, boolean wrap) {
         TextPaint paint = createPaint(fontSize, item.textColor, item.bold);
@@ -369,7 +503,6 @@ final class OverlayLayout {
         float maxW = wrap ? item.availableWidth : Math.max(item.availableWidth + item.maxOverhang,
                 paint.measureText(item.displayText) + 4f);
         int layoutWidth = Math.max(1, (int) Math.ceil(wrap ? item.availableWidth : maxW));
-        // Convert target pitchRatio relative to font metrics line height.
         Paint.FontMetrics fm = paint.getFontMetrics();
         float naturalHeight = Math.max(1f, fm.descent - fm.ascent);
         float mult = Math.max(.92f, Math.min(1.6f, (fontSize * item.pitchRatio) / naturalHeight));
@@ -394,9 +527,8 @@ final class OverlayLayout {
         float widest = 0f;
         for (int l = 0; l < lines; l++) widest = Math.max(widest, layout.getLineMax(l));
         if (widest > item.availableWidth + item.maxOverhang + .5f) return false;
-        float pitch = fontSize * item.pitchRatio;
-        float visualH = lines == 0 ? 0f : Math.min(layout.getHeight(), (lines - 1) * pitch + fontSize * 1.05f);
-        return visualH <= item.availableHeight + 1.5f;
+        // Compare against the true rendered StaticLayout height so the last line is never clipped.
+        return layout.getHeight() <= item.availableHeight + 2f;
     }
 
     private static float verticalAlignY(SpatialLayoutPlanner.Item item, Rect area, float pad,
